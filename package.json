@@ -36,7 +36,11 @@
       "category": "public.app-category.productivity"
     },
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis",
+        "dir"
+      ],
+      "signAndEditExecutable": false
     },
     "linux": {
       "target": "AppImage"

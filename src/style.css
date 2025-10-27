@@ -137,6 +137,15 @@ body {
   border-bottom-color: #3b3e43 !important;
 }
 
+/* 统一工具栏提示框行为：仅在 hover 时显示，点击后不保持 */
+.vditor-toolbar .vditor-tooltipped:focus::before,
+.vditor-toolbar .vditor-tooltipped:focus::after,
+.vditor-toolbar .vditor-tooltipped:active::before,
+.vditor-toolbar .vditor-tooltipped:active::after {
+  display: none !important;
+  opacity: 0 !important;
+}
+
 /* Velocity 主题特有的样式改进 */
 .vditor-toolbar__item {
   border-radius: 6px !important;
@@ -153,7 +162,6 @@ body {
 
 /* 完全禁用所有动画和过渡效果以减少闪烁 */
 .vditor-ir,
-.vditor-wysiwyg,
 .vditor-sv {
   transition: none !important;
   animation: none !important;

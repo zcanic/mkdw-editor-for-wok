@@ -22,8 +22,8 @@ const defaultContent = `# 欢迎使用 WOK Editor
 
 - **简洁界面** - 无干扰的写作环境
 - **完整 Markdown 支持** - 完整的 Markdown 语法
-- **实时预览** - 所见即所得的编辑体验
-- **多种模式** - 支持编辑、预览、实时渲染模式
+- **实时渲染** - 提供即时反馈的写作体验
+- **多种模式** - 支持编辑与预览模式
 - **快捷键支持** - 提高写作效率
 
 ## 开始写作
@@ -166,19 +166,15 @@ function initEditor() {
         'insert-before',
         'insert-after',
         '|',
-        'table',
-        '|',
-        'edit-mode',
-        'both',
+  'table',
+  '|',
+  'preview',
+  'both',
         'export',
         'outline',
       ],
       toolbarConfig: {
         pin: true,
-      },
-      customWysiwygToolbar: () => {
-        // 空函数避免Vditor内部错误
-        return []
       },
       counter: {
         enable: false,
@@ -211,6 +207,7 @@ function initEditor() {
       after: () => {
         // 编辑器初始化完成后的回调
         initOutlineResizer()
+        fixPreviewTooltipBehavior()
       },
     })
 
@@ -231,6 +228,34 @@ function initEditor() {
   }
 
   return null
+}
+
+// 修复预览按钮提示框点击后不消失的问题：点击后主动移除聚焦与悬浮态
+function fixPreviewTooltipBehavior() {
+  const toolbar = document.querySelector('.vditor-toolbar')
+  if (!toolbar) return
+
+  const isPreviewBtn = (el) => {
+    if (!el) return false
+    const label = (el.getAttribute && el.getAttribute('aria-label')) || ''
+    return /预览|preview/i.test(label)
+  }
+
+  const hideTooltip = (btn) => {
+    if (!btn) return
+    btn.classList && btn.classList.remove('vditor-tooltipped--hover')
+    if (typeof btn.blur === 'function') {
+      // 延迟到 Vditor 内部状态切换完成后再移除 focus
+      setTimeout(() => btn.blur(), 0)
+    }
+  }
+
+  toolbar.addEventListener('click', (e) => {
+    const target = e.target && e.target.closest ? e.target.closest('.vditor-toolbar__item') : null
+    if (isPreviewBtn(target)) {
+      hideTooltip(target)
+    }
+  })
 }
 
 // 可拖动边界功能
