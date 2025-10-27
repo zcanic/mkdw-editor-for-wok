@@ -146,6 +146,16 @@ body {
   opacity: 0 !important;
 }
 
+/* 移除“预览/preview”按钮的提示栏（完全不展示） */
+.vditor-toolbar .vditor-tooltipped[aria-label="预览"]::before,
+.vditor-toolbar .vditor-tooltipped[aria-label="预览"]::after,
+.vditor-toolbar .vditor-tooltipped[aria-label="preview"]::before,
+.vditor-toolbar .vditor-tooltipped[aria-label="preview"]::after {
+  display: none !important;
+  opacity: 0 !important;
+  content: none !important;
+}
+
 /* Velocity 主题特有的样式改进 */
 .vditor-toolbar__item {
   border-radius: 6px !important;

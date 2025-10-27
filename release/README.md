@@ -1,18 +1,23 @@
-# 打包产物存放说明
+# 打包产物与安装说明
 
-Electron Builder 的打包产物按照平台存放在 `release/` 目录下：
+构建后的产物统一存放在 `release/` 目录下：
 
-- **macOS**：产出文件（`dmg`、`zip`、`mac-*` 解包目录等）会生成在 `release/mac/`。
-- **Windows**：产出文件（`exe`、`nsis` 安装包、`win-*` 解包目录等）会生成在 `release/windows/`。
+- macOS：`release/mac/`（dmg、zip、解包目录等）。
+- Windows（便携版）：`release/win-unpacked/`（直接运行 `WOK Editor.exe`）。
 
-运行以下命令可以分别触发构建：
+## 如何构建
 
 ```bash
-# macOS / 本机构建
+# 本机构建（会先执行 Vite 构建，再调用 electron-builder）
 npm run electron:dist
-
-# Windows（需要在 Windows 环境或配置了对应交叉编译工具链的环境中）
-npm run electron:dist -- --win
 ```
 
-> ⚠️ 目录下的实际二进制产物已被 `.gitignore` 排除，请在需要发布时再生成。
+> 注：当前构建仅生成 Windows 便携版（dir 目标），不再产出 NSIS 安装器。
+
+## 便携运行（无需安装）
+
+`release/win-unpacked/` 下包含已解包的应用，可直接运行其中的 `WOK Editor.exe` 进行便携式使用（适合调试与快速验证）。
+
+---
+
+⚠️ 二进制产物通常被 `.gitignore` 排除，发布前请在本地或 CI 环境执行构建再产出安装包。

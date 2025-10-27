@@ -37,7 +37,6 @@
     },
     "win": {
       "target": [
-        "nsis",
         "dir"
       ],
       "signAndEditExecutable": false

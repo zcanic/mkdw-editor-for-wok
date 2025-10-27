@@ -256,6 +256,20 @@ function fixPreviewTooltipBehavior() {
       hideTooltip(target)
     }
   })
+
+  // 彻底移除预览按钮的提示（避免浏览器原生 title 或 aria 提示）
+  const disablePreviewTooltip = () => {
+    const items = toolbar.querySelectorAll('.vditor-toolbar__item')
+    items.forEach((el) => {
+      if (!isPreviewBtn(el)) return
+      el.removeAttribute('aria-label')
+      el.removeAttribute('title')
+      el.classList && el.classList.remove('vditor-tooltipped')
+    })
+  }
+
+  // 初始化时执行一次
+  disablePreviewTooltip()
 }
 
 // 可拖动边界功能
