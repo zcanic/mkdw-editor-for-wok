@@ -20,4 +20,6 @@ npm run electron:dist
 
 ---
 
+
+I'm coming!
 ⚠️ 二进制产物通常被 `.gitignore` 排除，发布前请在本地或 CI 环境执行构建再产出安装包。
