@@ -2,6 +2,12 @@
   "name": "vditor-editor",
   "version": "1.0.0",
   "description": "A clean and minimal markdown editor built with Vditor",
+  "author": "zcan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zcanic/mkdw-editor-for-wok.git"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

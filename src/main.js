@@ -1,6 +1,22 @@
 import Vditor from 'vditor'
 import 'vditor/dist/index.css'
 
+const isDev = import.meta.env.DEV
+const MAX_INLINE_IMAGE_SIZE_MB = 5
+const MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024
+const TOAST_DISPLAY_DURATION = 2000
+const TOAST_TRANSITION_DURATION = 300
+const OUTLINE_MIN_WIDTH = 200
+const OUTLINE_MAX_WIDTH = 600
+const PREVIEW_RENDER_DELAY = 500
+
+let vditor = null
+let activeToast = null
+let toastHideTimer = null
+let toastRemoveTimer = null
+let teardownElectronHandlers = null
+let electronBeforeUnloadHandler = null
+
 window.addEventListener('error', (event) => {
   // Surface renderer-side errors in the devtools console for easier Electron debugging
   // eslint-disable-next-line no-console
@@ -35,9 +51,8 @@ const defaultContent = `# 欢迎使用 WOK Editor
 > 专注于内容，让工具隐于无形
 
 \`\`\`javascript
-// 代码块示例
 function hello() {
-  // console.log("Hello, WOK Editor!");
+  return 'Hello, WOK Editor!'
 }
 \`\`\`
 
@@ -56,14 +71,17 @@ function hello() {
 | 表格 | 示例 |
 |------|------|
 | 列1  | 数据1 |
-| 列2  | 数据2 |`
-
-// Vditor 实例
-let vditor = null
-
+| 列2  | 数据2 |
+`
+;
 
 // 初始化编辑器
 function initEditor() {
+  if (vditor && typeof vditor.destroy === 'function') {
+    vditor.destroy()
+    vditor = null
+  }
+
   try {
     vditor = new Vditor('vditor', {
       height: '100%',
@@ -78,7 +96,6 @@ function initEditor() {
         handler: (files) => {
           if (!vditor) return
 
-          const MAX_INLINE_IMAGE_SIZE = 5 * 1024 * 1024
           const fileArray = Array.isArray(files) ? files : Array.from(files || [])
 
           if (fileArray.length === 0) {
@@ -100,7 +117,7 @@ function initEditor() {
             }
 
             if (oversized.length > 0) {
-              showToast(`以下图片超过 5MB 未插入：${oversized.join('、')}`)
+              showToast(`以下图片超过 ${MAX_INLINE_IMAGE_SIZE_MB}MB 未插入：${oversized.join('、')}`)
             }
 
             if (failed.length > 0) {
@@ -166,10 +183,10 @@ function initEditor() {
         'insert-before',
         'insert-after',
         '|',
-  'table',
-  '|',
-  'preview',
-  'both',
+        'table',
+        '|',
+        'preview',
+        'both',
         'export',
         'outline',
       ],
@@ -188,7 +205,7 @@ function initEditor() {
         position: 'left',
       },
       preview: {
-        delay: 500,
+        delay: PREVIEW_RENDER_DELAY,
         hljs: {
           enable: true,
           style: 'github',
@@ -214,20 +231,59 @@ function initEditor() {
     return vditor
   } catch (error) {
     console.error('编辑器初始化失败:', error)
-    // 显示错误信息
-    const editorElement = document.getElementById('vditor')
-    if (editorElement) {
-      editorElement.innerHTML = `
-        <div style="padding: 40px; text-align: center; color: #666;">
-          <h3>编辑器初始化失败</h3>
-          <p>请检查控制台查看详细错误信息</p>
-          <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin-top: 20px; text-align: left;">${error.message}</pre>
-        </div>
-      `
-    }
+    renderInitError(error)
   }
 
   return null
+}
+
+function renderInitError(error) {
+  const editorElement = document.getElementById('vditor')
+  if (!editorElement) return
+
+  editorElement.innerHTML = ''
+
+  const container = document.createElement('div')
+  container.style.padding = '40px'
+  container.style.textAlign = 'center'
+  container.style.color = '#666'
+
+  const title = document.createElement('h3')
+  title.textContent = '编辑器初始化失败'
+  container.appendChild(title)
+
+  const message = document.createElement('p')
+  message.textContent = '请检查控制台查看详细错误信息'
+  container.appendChild(message)
+
+  if (error) {
+    const details = document.createElement('pre')
+    details.style.background = '#f5f5f5'
+    details.style.padding = '10px'
+    details.style.borderRadius = '4px'
+    details.style.marginTop = '20px'
+    details.style.textAlign = 'left'
+    details.textContent = error instanceof Error ? error.message : String(error)
+    container.appendChild(details)
+  }
+
+  const retryButton = document.createElement('button')
+  retryButton.type = 'button'
+  retryButton.textContent = '重试加载编辑器'
+  retryButton.style.marginTop = '24px'
+  retryButton.style.padding = '10px 24px'
+  retryButton.style.border = 'none'
+  retryButton.style.borderRadius = '6px'
+  retryButton.style.background = '#5c6bc0'
+  retryButton.style.color = '#fff'
+  retryButton.style.cursor = 'pointer'
+  retryButton.addEventListener('click', () => {
+    editorElement.innerHTML = ''
+    initEditor()
+  })
+  container.appendChild(retryButton)
+
+  editorElement.appendChild(container)
 }
 
 // 修复预览按钮提示框点击后不消失的问题：点击后主动移除聚焦与悬浮态
@@ -277,9 +333,6 @@ function initOutlineResizer() {
   const editorElement = document.getElementById('vditor')
   if (!editorElement) return
 
-  const MIN_WIDTH = 200
-  const MAX_WIDTH = 600
-
   const ensureResizer = (outlineElement) => {
     if (!outlineElement) return
 
@@ -295,7 +348,7 @@ function initOutlineResizer() {
 
     let isResizing = false
     let startX = 0
-    let startWidth = outlineElement.offsetWidth || MIN_WIDTH
+    let startWidth = outlineElement.offsetWidth || OUTLINE_MIN_WIDTH
 
     const stopResizing = () => {
       if (!isResizing) return
@@ -310,8 +363,8 @@ function initOutlineResizer() {
       const deltaX = event.clientX - startX
       let newWidth = startWidth + deltaX
 
-      if (newWidth < MIN_WIDTH) newWidth = MIN_WIDTH
-      if (newWidth > MAX_WIDTH) newWidth = MAX_WIDTH
+      if (newWidth < OUTLINE_MIN_WIDTH) newWidth = OUTLINE_MIN_WIDTH
+      if (newWidth > OUTLINE_MAX_WIDTH) newWidth = OUTLINE_MAX_WIDTH
 
       outlineElement.style.width = `${newWidth}px`
       if (vditor) {
@@ -325,14 +378,14 @@ function initOutlineResizer() {
       startX = event.clientX
       const computedWidth = parseInt(window.getComputedStyle(outlineElement).width, 10)
       startWidth = Number.isNaN(computedWidth)
-        ? outlineElement.offsetWidth || MIN_WIDTH
+        ? outlineElement.offsetWidth || OUTLINE_MIN_WIDTH
         : computedWidth
 
       event.preventDefault()
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', stopResizing)
       window.addEventListener('blur', stopResizing)
-  })
+    })
   }
 
   const observer = new MutationObserver((mutationsList) => {
@@ -354,86 +407,155 @@ function initOutlineResizer() {
 
 // 显示提示消息
 function showToast(message) {
+  if (!message) return
+
+  if (activeToast && activeToast.parentElement) {
+    activeToast.parentElement.removeChild(activeToast)
+  }
+
+  window.clearTimeout(toastHideTimer)
+  window.clearTimeout(toastRemoveTimer)
+  toastHideTimer = null
+  toastRemoveTimer = null
+
   const toast = document.createElement('div')
   toast.style.cssText = `
     position: fixed;
     top: 20px;
     right: 20px;
     background: #333;
-    color: white;
+    color: #fff;
     padding: 12px 20px;
     border-radius: 6px;
     font-size: 14px;
     z-index: 1000;
     opacity: 0;
     transform: translateY(-10px);
-    transition: all 0.3s ease;
+    transition: opacity 0.3s ease, transform 0.3s ease;
   `
   toast.textContent = message
   document.body.appendChild(toast)
 
-  // 显示动画
-  setTimeout(() => {
+  // 使用 requestAnimationFrame 确保元素已插入后再执行动画
+  requestAnimationFrame(() => {
     toast.style.opacity = '1'
     toast.style.transform = 'translateY(0)'
-  }, 10)
+  })
 
-  // 隐藏动画
-  setTimeout(() => {
-    toast.style.opacity = '0'
-    toast.style.transform = 'translateY(-10px)'
-    setTimeout(() => {
-      document.body.removeChild(toast)
-    }, 300)
-  }, 2000)
+  toastHideTimer = window.setTimeout(() => {
+  toast.style.opacity = '0'
+  toast.style.transform = 'translateY(-10px)'
+  toastRemoveTimer = window.setTimeout(() => {
+      if (toast.parentElement) {
+        toast.parentElement.removeChild(toast)
+      }
+      if (activeToast === toast) {
+        activeToast = null
+      }
+    }, TOAST_TRANSITION_DURATION)
+  }, TOAST_DISPLAY_DURATION)
+
+  activeToast = toast
 }
 
 // Electron 文件操作功能
 function setupElectronHandlers() {
-  if (window.electronAPI) {
-    // 新建文件
+  if (!window.electronAPI) {
+    if (isDev) {
+      console.info('Electron API bridge is not available on window, skipping IPC handlers')
+    }
+    return
+  }
+
+  if (typeof teardownElectronHandlers === 'function') {
+    teardownElectronHandlers()
+  }
+
+  const unsubscribes = []
+  const register = (unsubscribe) => {
+    if (typeof unsubscribe === 'function') {
+      unsubscribes.push(unsubscribe)
+    }
+  }
+
+  register(
     window.electronAPI.onNewFile(() => {
       if (vditor) {
         vditor.setValue('')
         showToast('已创建新文件')
       }
     })
+  )
 
-    // 打开文件
-    window.electronAPI.onOpenFile((event, data) => {
-      if (vditor && data.content) {
+  register(
+    window.electronAPI.onOpenFile((_event, data) => {
+      if (vditor && data?.content) {
         vditor.setValue(data.content)
-        showToast(`已打开文件: ${data.filePath}`)
+        if (data.filePath) {
+          showToast(`已打开文件: ${data.filePath}`)
+        } else {
+          showToast('文件内容已加载')
+        }
       }
     })
+  )
 
-    // 保存文件
+  register(
     window.electronAPI.onSaveFile(async () => {
-      if (vditor) {
-        const content = vditor.getValue()
-        const result = await window.electronAPI.saveFile(content)
-        if (result.success) {
-          showToast(`文件已保存: ${result.filePath}`)
-        }
+      if (!vditor) return
+      const content = vditor.getValue()
+      const result = await window.electronAPI.saveFile(content)
+      if (result?.success) {
+        showToast(`文件已保存: ${result.filePath}`)
+      } else if (result && !result.canceled && result.error) {
+        showToast(`保存失败: ${result.error}`)
       }
     })
+  )
 
-    // 另存为
+  register(
     window.electronAPI.onSaveAsFile(async () => {
-      if (vditor) {
-        const content = vditor.getValue()
-        const result = await window.electronAPI.saveFileAs(content)
-        if (result.success) {
-          showToast(`文件已另存为: ${result.filePath}`)
-        }
+      if (!vditor) return
+      const content = vditor.getValue()
+      const result = await window.electronAPI.saveFileAs(content)
+      if (result?.success) {
+        showToast(`文件已另存为: ${result.filePath}`)
+      } else if (result && !result.canceled && result.error) {
+        showToast(`另存为失败: ${result.error}`)
       }
     })
+  )
+
+  const cleanup = () => {
+    while (unsubscribes.length > 0) {
+      const unsubscribe = unsubscribes.pop()
+      try {
+        unsubscribe()
+      } catch (cleanupError) {
+        if (isDev) {
+          console.warn('清理 Electron 监听器失败:', cleanupError)
+        }
+      }
+    }
+
+    if (electronBeforeUnloadHandler) {
+      window.removeEventListener('beforeunload', electronBeforeUnloadHandler)
+      electronBeforeUnloadHandler = null
+    }
   }
+
+  teardownElectronHandlers = cleanup
+  electronBeforeUnloadHandler = () => cleanup()
+  window.addEventListener('beforeunload', electronBeforeUnloadHandler)
+
+  return cleanup
 }
 
 // 页面加载完成后初始化编辑器
 document.addEventListener('DOMContentLoaded', () => {
-  console.info('Renderer DOMContentLoaded: initializing editor')
+  if (isDev) {
+    console.info('Renderer DOMContentLoaded: initializing editor')
+  }
   initEditor()
   setupElectronHandlers()
 })

@@ -10,6 +10,7 @@ let currentFilePath = null
 
 const APP_NAME = 'WOK Editor'
 const isMac = process.platform === 'darwin'
+const isDev = !app.isPackaged
 
 const fileFilters = [
   { name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] },
@@ -49,7 +50,9 @@ function registerWindowDiagnostics(windowInstance) {
   if (!windowInstance) return
 
   windowInstance.webContents.on('did-finish-load', () => {
-    console.info('[main] Renderer finished load:', windowInstance.webContents.getURL())
+    if (isDev) {
+      console.info('[main] Renderer finished load:', windowInstance.webContents.getURL())
+    }
   })
 
   windowInstance.webContents.on(
@@ -75,6 +78,10 @@ function registerWindowDiagnostics(windowInstance) {
       2: 'error'
     }
     const method = levelMap[level] || 'log'
+    if (!isDev && method === 'log') {
+      return
+    }
+
     console[method](`(renderer) ${message} (${sourceId}:${line})`)
   })
 }
@@ -98,16 +105,16 @@ function createWindow() {
   // 开发环境使用 Vite Dev Server，发行包加载打包后的 HTML
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
-    if (!app.isPackaged) {
-      mainWindow.webContents.openDevTools({ mode: 'detach' })
-    }
   } else {
     const indexHtmlPath = resolveIndexHtml()
-    console.info('[main] Loading renderer from:', indexHtmlPath)
-    mainWindow.loadFile(indexHtmlPath)
-    if (!app.isPackaged) {
-      mainWindow.webContents.openDevTools({ mode: 'detach' })
+    if (isDev) {
+      console.info('[main] Loading renderer from:', indexHtmlPath)
     }
+    mainWindow.loadFile(indexHtmlPath)
+  }
+
+  if (isDev && mainWindow?.webContents) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' })
   }
   updateWindowTitle()
   mainWindow.on('closed', () => {

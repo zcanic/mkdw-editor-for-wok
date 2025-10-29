@@ -10,7 +10,6 @@ body {
   background: #ffffff;
   color: #2c3e50;
   height: 100vh;
-  /* overflow: hidden; */
 }
 
 #app {
@@ -168,45 +167,6 @@ body {
 
 .vditor-toolbar__item--active {
   background: #e8e8e8 !important;
-}
-
-/* 完全禁用所有动画和过渡效果以减少闪烁 */
-.vditor-ir,
-.vditor-sv {
-  transition: none !important;
-  animation: none !important;
-}
-
-/* 优化工具栏切换动画 */
-.vditor-toolbar {
-  transition: none !important;
-  animation: none !important;
-}
-
-/* 禁用不必要的过渡效果 */
-.vditor-content {
-  transition: none !important;
-  animation: none !important;
-}
-
-/* 禁用编辑器内部所有过渡效果 */
-.vditor * {
-  transition: none !important;
-  animation: none !important;
-}
-
-/* 禁用按钮悬停动画 */
-.vditor-toolbar__item {
-  transition: none !important;
-}
-
-/* 禁用工具栏按钮状态变化动画 */
-.vditor-toolbar__item:hover {
-  transition: none !important;
-}
-
-.vditor-toolbar__item--active {
-  transition: none !important;
 }
 
 /* 优化代码块样式 */
