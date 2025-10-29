@@ -1,14 +1,26 @@
 import Vditor from 'vditor'
 import 'vditor/dist/index.css'
+import 'vditor/dist/js/i18n/zh_CN'
+import 'vditor/dist/js/lute/lute.min.js'
 
 const isDev = import.meta.env.DEV
-const MAX_INLINE_IMAGE_SIZE_MB = 5
+const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI)
+const DEFAULT_DOCUMENT_TITLE = typeof document !== 'undefined' ? document.title : 'WOK Editor'
+const MAX_INLINE_IMAGE_SIZE_MB = 1
 const MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024
 const TOAST_DISPLAY_DURATION = 2000
 const TOAST_TRANSITION_DURATION = 300
 const OUTLINE_MIN_WIDTH = 200
 const OUTLINE_MAX_WIDTH = 600
-const PREVIEW_RENDER_DELAY = 500
+const PREVIEW_RENDER_DELAY = 150
+const MAX_CONCURRENT_FILE_READS = 3
+const MAX_ALT_TEXT_LENGTH = 100
+const AUTO_SAVE_DELAY = 3000
+const AUTO_SAVE_MIN_INTERVAL = 10000
+const LOCAL_STORAGE_CONTENT_KEY = 'wok-editor:last-content'
+const LOCAL_STORAGE_UPDATED_AT_KEY = 'wok-editor:last-updated'
+const BROWSER_AUTO_SAVE_DELAY = 1500
+const BROWSER_MAX_PERSISTED_CHAR_COUNT = 700000
 
 let vditor = null
 let activeToast = null
@@ -16,6 +28,88 @@ let toastHideTimer = null
 let toastRemoveTimer = null
 let teardownElectronHandlers = null
 let electronBeforeUnloadHandler = null
+let resolveEditorReady = () => {}
+let editorReadyPromise = Promise.resolve()
+let isEditorDirty = false
+let suppressDirtyTracking = false
+let knownFilePath = null
+let autoSaveTimer = null
+let lastAutoSaveTimestamp = 0
+let browserPersistTimer = null
+let browserPersistOverflowNotified = false
+let isLocalStorageAvailable = null
+const vditorLocale = typeof window !== 'undefined' && window.VditorI18n ? window.VditorI18n : undefined
+let inlineEventGuardInstalled = false
+
+if (typeof window !== 'undefined' && vditorLocale) {
+  window.VditorI18n = vditorLocale
+}
+
+function installInlineEventAttributeGuard() {
+  if (inlineEventGuardInstalled) {
+    return
+  }
+
+  if (typeof Element === 'undefined') {
+    return
+  }
+
+  // Acquire descriptor from Element.prototype first, fallback to HTMLElement.prototype for older engines.
+  const descriptorInfo = (() => {
+    const elementDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML')
+    if (elementDescriptor) {
+      return { descriptor: elementDescriptor, target: Element.prototype }
+    }
+    if (typeof HTMLElement !== 'undefined') {
+      const htmlDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerHTML')
+      if (htmlDescriptor) {
+        return { descriptor: htmlDescriptor, target: HTMLElement.prototype }
+      }
+    }
+    return null
+  })()
+
+  if (!descriptorInfo || typeof descriptorInfo.descriptor.set !== 'function') {
+    return
+  }
+
+  const { descriptor, target } = descriptorInfo
+  const originalSetter = descriptor.set
+  const originalGetter = descriptor.get
+
+  try {
+    Object.defineProperty(target, 'innerHTML', {
+      configurable: descriptor.configurable,
+      enumerable: descriptor.enumerable,
+      get: originalGetter,
+      set(value) {
+        let nextValue = value
+
+        if (typeof nextValue === 'string' && nextValue.includes('vditor') && /\son[a-z]+\s*=\s*/i.test(nextValue)) {
+          // Strip all inline event attributes to comply with strict CSP.
+          nextValue = nextValue
+            .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, ' ')
+            .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, ' ')
+            .replace(/\s{2,}/g, ' ')
+        }
+
+        return originalSetter.call(this, nextValue)
+      }
+    })
+
+    inlineEventGuardInstalled = true
+  } catch (_err) {
+    // Ignore descriptor redefinition failures (older browsers), fallback to runtime sanitization instead.
+  }
+}
+
+function resetEditorReadyPromise() {
+  editorReadyPromise = new Promise((resolve) => {
+    resolveEditorReady = resolve
+  })
+}
+
+resetEditorReadyPromise()
 
 window.addEventListener('error', (event) => {
   // Surface renderer-side errors in the devtools console for easier Electron debugging
@@ -75,21 +169,42 @@ function hello() {
 `
 ;
 
+function getInitialEditorContent() {
+  const restored = !isElectron ? readPersistedBrowserContent() : null
+  if (typeof restored === 'string' && restored.length > 0) {
+    return restored
+  }
+  return defaultContent
+}
+
 // 初始化编辑器
 function initEditor() {
+  resetEditorReadyPromise()
+
   if (vditor && typeof vditor.destroy === 'function') {
     vditor.destroy()
     vditor = null
   }
 
+  installInlineEventAttributeGuard()
+
   try {
+    const initialValue = getInitialEditorContent()
     vditor = new Vditor('vditor', {
+      cdn: './vditor',
       height: '100%',
       mode: 'ir',
       placeholder: '开始写作...',
-      value: defaultContent,
+      value: initialValue,
+      lang: 'zh_CN',
+  i18n: vditorLocale,
+      input: () => {
+        if (!suppressDirtyTracking) {
+          markDirtyState(true)
+        }
+      },
       cache: {
-        enable: false
+        enable: !isElectron
       },
       upload: {
         accept: 'image/*',
@@ -103,64 +218,112 @@ function initEditor() {
             return
           }
 
-          let processedCount = 0
-          let successCount = 0
+          const queue = fileArray.map((file, index) => ({ file, index }))
+          const markdownSnippets = new Array(fileArray.length).fill('')
           const oversized = []
           const failed = []
+          let processedCount = 0
+          let inFlight = 0
+          let successCount = 0
+          let batchFinalized = false
 
-          const finalize = () => {
-            processedCount += 1
-            if (processedCount !== fileArray.length) return
+          const finalizeBatch = () => {
+            if (batchFinalized) {
+              return
+            }
+            batchFinalized = true
 
+            const mergedMarkdown = markdownSnippets.filter(Boolean).join('')
+            if (mergedMarkdown && vditor) {
+              vditor.insertValue(mergedMarkdown)
+              markDirtyState(true)
+            }
+
+            const messages = []
             if (successCount > 0) {
-              showToast(`已插入${successCount}张图片`)
+              messages.push(`已插入${successCount}张图片`)
             }
-
             if (oversized.length > 0) {
-              showToast(`以下图片超过 ${MAX_INLINE_IMAGE_SIZE_MB}MB 未插入：${oversized.join('、')}`)
+              messages.push(`以下图片超过 ${MAX_INLINE_IMAGE_SIZE_MB}MB 未插入：${oversized.join('、')}`)
             }
-
             if (failed.length > 0) {
-              showToast(`以下图片读取失败：${failed.join('、')}`)
+              messages.push(`以下图片读取失败：${failed.join('、')}`)
+            }
+            if (messages.length > 0) {
+              showToast(messages.join('\n'))
             }
           }
 
-          fileArray.forEach((file) => {
-            const isFile = typeof File !== 'undefined' && file instanceof File
-            if (!isFile || typeof file.size !== 'number') {
-              const displayName = file && typeof file.name === 'string' ? file.name : '未知文件'
-              failed.push(displayName)
-              finalize()
-              return
+          const finalizeSyncItem = () => {
+            processedCount += 1
+            if (processedCount === fileArray.length) {
+              finalizeBatch()
+              return true
             }
+            return false
+          }
 
-            if (file.size > MAX_INLINE_IMAGE_SIZE) {
-              oversized.push(file.name)
-              finalize()
-              return
+          const handleAsyncCompletion = () => {
+            inFlight -= 1
+            processedCount += 1
+            if (processedCount === fileArray.length) {
+              finalizeBatch()
+            } else {
+              pumpQueue()
             }
+          }
 
-            const reader = new FileReader()
+          const pumpQueue = () => {
+            while (inFlight < MAX_CONCURRENT_FILE_READS && queue.length > 0) {
+              const { file, index } = queue.shift()
+              const isFile = typeof File !== 'undefined' && file instanceof File
 
-            reader.onload = () => {
-              const result = reader.result
-              if (typeof result === 'string') {
-                const altText = file.name.replace(/[\[\]]/g, '')
-                vditor.insertValue(`![${altText}](${result})\n`)
-                successCount += 1
-              } else {
-                failed.push(file.name)
+              if (!isFile || typeof file.size !== 'number') {
+                const displayName = file && typeof file.name === 'string' ? file.name : '未知文件'
+                failed.push(displayName)
+                if (finalizeSyncItem()) {
+                  return
+                }
+                continue
               }
-              finalize()
+
+              if (file.size > MAX_INLINE_IMAGE_SIZE) {
+                oversized.push(file.name)
+                if (finalizeSyncItem()) {
+                  return
+                }
+                continue
+              }
+
+              inFlight += 1
+              const reader = new FileReader()
+
+              reader.onload = () => {
+                const result = reader.result
+                if (typeof result === 'string') {
+                  const altText = sanitizeAltText(file.name)
+                  markdownSnippets[index] = `![${altText}](${result})\n`
+                  successCount += 1
+                } else {
+                  failed.push(file.name)
+                }
+                handleAsyncCompletion()
+              }
+
+              reader.onerror = () => {
+                failed.push(file.name)
+                handleAsyncCompletion()
+              }
+
+              reader.readAsDataURL(file)
             }
 
-            reader.onerror = () => {
-              failed.push(file.name)
-              finalize()
+            if (queue.length === 0 && inFlight === 0 && processedCount === fileArray.length) {
+              finalizeBatch()
             }
+          }
 
-            reader.readAsDataURL(file)
-          })
+          pumpQueue()
         },
       },
       toolbar: [
@@ -209,7 +372,69 @@ function initEditor() {
         hljs: {
           enable: true,
           style: 'github',
-          lineNumber: true
+          lineNumber: true,
+          // Override Vditor's default copy button renderer to avoid inline event handlers
+          renderMenu: (codeEl, copyContainer) => {
+            try {
+              // Ensure the textarea exists as first child (inserted by Vditor prior to renderMenu)
+              const textarea = copyContainer.querySelector('textarea')
+              // Remove any prebuilt inline-handler span if present
+              const oldSpan = copyContainer.querySelector('span')
+              if (oldSpan) {
+                oldSpan.removeAttribute('onclick')
+                oldSpan.removeAttribute('onmouseover')
+              }
+
+              // Build a safe copy button
+              const btn = document.createElement('span')
+              btn.className = 'vditor-tooltipped vditor-tooltipped__w'
+              btn.setAttribute('aria-label', '复制')
+              // Reuse the icon symbol if available
+              const svgNS = 'http://www.w3.org/2000/svg'
+              const svg = document.createElementNS(svgNS, 'svg')
+              const use = document.createElementNS(svgNS, 'use')
+              use.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#vditor-icon-copy')
+              svg.appendChild(use)
+              btn.appendChild(svg)
+
+              // Attach safe listeners
+              btn.addEventListener('mouseover', () => {
+                btn.setAttribute('aria-label', '复制')
+              })
+              btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                const targetTextarea = textarea || copyContainer.querySelector('textarea')
+                if (targetTextarea && typeof targetTextarea.select === 'function') {
+                  try { targetTextarea.select() } catch (_) {}
+                  try { document.execCommand('copy') } catch (_) {}
+                  try {
+                    const sel = window.getSelection && window.getSelection()
+                    sel && sel.removeAllRanges && sel.removeAllRanges()
+                  } catch (_) {}
+                  btn.setAttribute('aria-label', '已复制')
+                  try { targetTextarea.blur() } catch (_) {}
+                }
+              })
+
+              // Rebuild container children: textarea + button
+              if (textarea && textarea.parentElement === copyContainer) {
+                // Remove everything except the textarea, then append button
+                Array.from(copyContainer.children).forEach((child) => {
+                  if (child !== textarea) copyContainer.removeChild(child)
+                })
+                copyContainer.appendChild(btn)
+              } else {
+                copyContainer.innerHTML = ''
+                if (textarea) copyContainer.appendChild(textarea)
+                copyContainer.appendChild(btn)
+              }
+
+              // Mark sanitized to avoid later mutation work
+              copyContainer.__wokSanitized = true
+            } catch (_e) {
+              // no-op
+            }
+          }
         },
         markdown: {
           toc: true,
@@ -220,21 +445,75 @@ function initEditor() {
         math: {
           engine: 'KaTeX',
         },
+        // Sanitize the generated HTML before Vditor runs its renderers, to avoid
+        // CSP-unsafe features (remote PlantUML, eval-based ECharts) and keep everything local.
+        transform: (html) => {
+          try {
+            const container = document.createElement('div')
+            container.innerHTML = html
+
+            // Disable PlantUML (would embed remote https://www.plantuml.com) under strict CSP
+            container.querySelectorAll('pre > code.language-plantuml').forEach((codeEl) => {
+              const pre = codeEl.closest('pre') || codeEl.parentElement
+              if (!pre) return
+              const raw = codeEl.textContent || ''
+              const replacement = document.createElement('pre')
+              const safe = document.createElement('code')
+              safe.className = 'language-text'
+              safe.textContent = '[PlantUML 预览已禁用以满足本地/CSP 限制]\n' + raw
+              replacement.appendChild(safe)
+              pre.replaceWith(replacement)
+            })
+
+            // Disable generic ECharts renderer which relies on new Function (unsafe-eval under CSP)
+            container.querySelectorAll('pre > code.language-echarts').forEach((codeEl) => {
+              const pre = codeEl.closest('pre') || codeEl.parentElement
+              if (!pre) return
+              const raw = codeEl.textContent || ''
+              const replacement = document.createElement('pre')
+              const safe = document.createElement('code')
+              safe.className = 'language-json'
+              safe.textContent = '[ECharts 预览已禁用以满足本地/CSP 限制]\n' + raw
+              replacement.appendChild(safe)
+              pre.replaceWith(replacement)
+            })
+
+            // Disable Graphviz (uses Worker via blob: which may be restricted in some environments)
+            container.querySelectorAll('pre > code.language-graphviz').forEach((codeEl) => {
+              const pre = codeEl.closest('pre') || codeEl.parentElement
+              if (!pre) return
+              const raw = codeEl.textContent || ''
+              const replacement = document.createElement('pre')
+              const safe = document.createElement('code')
+              safe.className = 'language-text'
+              safe.textContent = '[Graphviz 预览已禁用以满足本地/CSP 限制]\n' + raw
+              replacement.appendChild(safe)
+              pre.replaceWith(replacement)
+            })
+
+            return container.innerHTML
+          } catch (_e) {
+            return html
+          }
+        },
       },
       after: () => {
         // 编辑器初始化完成后的回调
         initOutlineResizer()
         fixPreviewTooltipBehavior()
+        // Sanitize any inline event handlers Vditor may have injected (e.g., copy buttons)
+        sanitizeInlineHandlers()
+        observeAndSanitizeInlineHandlers()
+        resolveEditorReady(vditor)
+        markDirtyState(false)
       },
     })
 
-    return vditor
   } catch (error) {
     console.error('编辑器初始化失败:', error)
     renderInitError(error)
+    resolveEditorReady(null)
   }
-
-  return null
 }
 
 function renderInitError(error) {
@@ -328,6 +607,87 @@ function fixPreviewTooltipBehavior() {
   disablePreviewTooltip()
 }
 
+// Remove CSP-unsafe inline event handlers from Vditor UI (e.g., copy buttons),
+// and reattach safe listeners.
+function sanitizeInlineHandlers(root = document) {
+  try {
+    const buttons = root.querySelectorAll('.vditor-copy > span')
+    buttons.forEach((btn) => {
+      if (btn.__wokSanitized) return
+      btn.removeAttribute('onclick')
+      btn.removeAttribute('onmouseover')
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const textarea = btn.previousElementSibling
+        if (textarea && typeof textarea.select === 'function') {
+          textarea.select()
+          try {
+            document.execCommand('copy')
+          } catch (_err) { /* noop */ }
+          try {
+            const sel = window.getSelection && window.getSelection()
+            sel && sel.removeAllRanges && sel.removeAllRanges()
+          } catch (_err) { /* noop */ }
+          btn.setAttribute('aria-label', '已复制')
+          if (typeof textarea.blur === 'function') textarea.blur()
+        }
+      })
+      btn.addEventListener('mouseover', () => {
+        btn.setAttribute('aria-label', '复制')
+      })
+      btn.__wokSanitized = true
+    })
+
+    // Sanitize image preview overlay injected by Vditor (removes inline onclicks)
+    const overlays = root.querySelectorAll('.vditor-img')
+    overlays.forEach((overlay) => {
+      if (overlay.__wokSanitized) return
+      // Close areas with inline handlers
+      const closeBtn = overlay.querySelector('.vditor-img__bar > .vditor-img__btn:nth-child(2)')
+      const clickArea = overlay.querySelector('.vditor-img__img')
+      const doClose = () => {
+        try { document.body.style.overflow = '' } catch (_) {}
+        if (overlay && overlay.parentElement) {
+          overlay.parentElement.removeChild(overlay)
+        }
+      }
+      if (closeBtn) {
+        closeBtn.removeAttribute('onclick')
+        closeBtn.addEventListener('click', (e) => { e.stopPropagation(); doClose() })
+      }
+      if (clickArea) {
+        clickArea.removeAttribute('onclick')
+        clickArea.addEventListener('click', (e) => { e.stopPropagation(); doClose() })
+      }
+      overlay.__wokSanitized = true
+    })
+  } catch (_e) {
+    // no-op
+  }
+}
+
+function observeAndSanitizeInlineHandlers() {
+  const editor = document.getElementById('vditor')
+  const roots = [document.body]
+  if (editor) roots.push(editor)
+
+  const mo = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === 'childList') {
+        m.addedNodes.forEach((node) => {
+          if (node && node.querySelectorAll) {
+            sanitizeInlineHandlers(node)
+          }
+        })
+      }
+    }
+  })
+  roots.forEach((root) => {
+    mo.observe(root, { childList: true, subtree: true })
+    sanitizeInlineHandlers(root)
+  })
+}
+
 // 可拖动边界功能
 function initOutlineResizer() {
   const editorElement = document.getElementById('vditor')
@@ -388,20 +748,57 @@ function initOutlineResizer() {
     })
   }
 
+  const isDocumentFragment = (node) =>
+    typeof DocumentFragment !== 'undefined' && node instanceof DocumentFragment
+
+  const visitOutlineNodes = (root, callback) => {
+    if (!root || typeof callback !== 'function') return
+
+    const stack = []
+    const pushNode = (node) => {
+      if (!node) return
+      if (node instanceof HTMLElement) {
+        stack.push(node)
+      } else if (isDocumentFragment(node)) {
+        Array.from(node.childNodes || []).forEach((child) => pushNode(child))
+      }
+    }
+
+    pushNode(root)
+
+    while (stack.length > 0) {
+      const element = stack.pop()
+      if (!element) continue
+
+      if (element.classList && element.classList.contains('vditor-outline')) {
+        callback(element)
+      }
+
+      const children = element.children || []
+      for (const child of children) {
+        pushNode(child)
+      }
+    }
+  }
+
   const observer = new MutationObserver((mutationsList) => {
     for (const mutation of mutationsList) {
       if (mutation.type !== 'childList') continue
-      const outlines = editorElement.querySelectorAll('.vditor-outline')
-      outlines.forEach(ensureResizer)
+      for (const node of mutation.addedNodes) {
+        visitOutlineNodes(node, ensureResizer)
+      }
+      if (
+        mutation.target instanceof HTMLElement &&
+        mutation.target.classList.contains('vditor-outline')
+      ) {
+        ensureResizer(mutation.target)
+      }
     }
   })
 
-  observer.observe(editorElement, { childList: true, subtree: true })
+  observer.observe(editorElement, { childList: true, subtree: false })
 
-  const initialOutline = editorElement.querySelector('.vditor-outline')
-  if (initialOutline) {
-    ensureResizer(initialOutline)
-  }
+  visitOutlineNodes(editorElement, ensureResizer)
 }
 
 
@@ -432,6 +829,7 @@ function showToast(message) {
     opacity: 0;
     transform: translateY(-10px);
     transition: opacity 0.3s ease, transform 0.3s ease;
+    white-space: pre-line;
   `
   toast.textContent = message
   document.body.appendChild(toast)
@@ -443,9 +841,9 @@ function showToast(message) {
   })
 
   toastHideTimer = window.setTimeout(() => {
-  toast.style.opacity = '0'
-  toast.style.transform = 'translateY(-10px)'
-  toastRemoveTimer = window.setTimeout(() => {
+    toast.style.opacity = '0'
+    toast.style.transform = 'translateY(-10px)'
+    toastRemoveTimer = window.setTimeout(() => {
       if (toast.parentElement) {
         toast.parentElement.removeChild(toast)
       }
@@ -460,7 +858,7 @@ function showToast(message) {
 
 // Electron 文件操作功能
 function setupElectronHandlers() {
-  if (!window.electronAPI) {
+  if (!isElectron || !window.electronAPI) {
     if (isDev) {
       console.info('Electron API bridge is not available on window, skipping IPC handlers')
     }
@@ -479,51 +877,88 @@ function setupElectronHandlers() {
   }
 
   register(
-    window.electronAPI.onNewFile(() => {
-      if (vditor) {
-        vditor.setValue('')
+    window.electronAPI.onNewFile(() =>
+      executeWithEditor((editorInstance) => {
+        knownFilePath = null
+        cancelAutoSave()
+        withDirtyTrackingSuppressed(() => {
+          editorInstance.setValue('')
+        })
+        markDirtyState(false)
         showToast('已创建新文件')
-      }
-    })
+      })
+    )
   )
 
   register(
-    window.electronAPI.onOpenFile((_event, data) => {
-      if (vditor && data?.content) {
-        vditor.setValue(data.content)
+    window.electronAPI.onOpenFile((_event, data) =>
+      executeWithEditor((editorInstance) => {
+        if (!data?.content) {
+          return
+        }
+        knownFilePath = typeof data.filePath === 'string' && data.filePath.length > 0 ? data.filePath : null
+        cancelAutoSave()
+        withDirtyTrackingSuppressed(() => {
+          editorInstance.setValue(data.content)
+        })
+        markDirtyState(false)
         if (data.filePath) {
           showToast(`已打开文件: ${data.filePath}`)
         } else {
           showToast('文件内容已加载')
         }
-      }
-    })
+      })
+    )
   )
 
   register(
-    window.electronAPI.onSaveFile(async () => {
-      if (!vditor) return
-      const content = vditor.getValue()
-      const result = await window.electronAPI.saveFile(content)
-      if (result?.success) {
-        showToast(`文件已保存: ${result.filePath}`)
-      } else if (result && !result.canceled && result.error) {
-        showToast(`保存失败: ${result.error}`)
-      }
-    })
+    window.electronAPI.onSaveFile(() =>
+      executeWithEditor(
+        async (editorInstance) => {
+          const content = editorInstance.getValue()
+          const result = await window.electronAPI.saveFile(content)
+          if (result?.success) {
+            knownFilePath = result.filePath || knownFilePath
+            lastAutoSaveTimestamp = Date.now()
+            markDirtyState(false)
+            showToast(`文件已保存: ${result.filePath}`)
+          } else if (result && !result.canceled && result.error) {
+            showToast(`保存失败: ${result.error}`)
+          }
+        },
+        (error) => {
+          if (isDev) {
+            console.error('保存文件时发生错误:', error)
+          }
+          showToast(`保存失败: ${error?.message || '未知错误'}`)
+        }
+      )
+    )
   )
 
   register(
-    window.electronAPI.onSaveAsFile(async () => {
-      if (!vditor) return
-      const content = vditor.getValue()
-      const result = await window.electronAPI.saveFileAs(content)
-      if (result?.success) {
-        showToast(`文件已另存为: ${result.filePath}`)
-      } else if (result && !result.canceled && result.error) {
-        showToast(`另存为失败: ${result.error}`)
-      }
-    })
+    window.electronAPI.onSaveAsFile(() =>
+      executeWithEditor(
+        async (editorInstance) => {
+          const content = editorInstance.getValue()
+          const result = await window.electronAPI.saveFileAs(content)
+          if (result?.success) {
+            knownFilePath = result.filePath || knownFilePath
+            lastAutoSaveTimestamp = Date.now()
+            markDirtyState(false)
+            showToast(`文件已另存为: ${result.filePath}`)
+          } else if (result && !result.canceled && result.error) {
+            showToast(`另存为失败: ${result.error}`)
+          }
+        },
+        (error) => {
+          if (isDev) {
+            console.error('另存为时发生错误:', error)
+          }
+          showToast(`另存为失败: ${error?.message || '未知错误'}`)
+        }
+      )
+    )
   )
 
   const cleanup = () => {
@@ -551,11 +986,307 @@ function setupElectronHandlers() {
   return cleanup
 }
 
+function setupBrowserFallbacks() {
+  if (isElectron) {
+    return
+  }
+
+  if (isDev) {
+    console.info('Running in browser mode, enabling local storage persistence')
+  }
+
+  window.addEventListener('beforeunload', (event) => {
+    if (isEditorDirty) {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+  })
+
+  if (!isBrowserStorageAvailable()) {
+    showToast('当前浏览器无法访问本地存储，请谨慎操作并手动备份内容')
+    return
+  }
+
+  const lastPersistedAtRaw = window.localStorage.getItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+  if (lastPersistedAtRaw) {
+    const timestamp = Number(lastPersistedAtRaw)
+    if (!Number.isNaN(timestamp) && timestamp > 0) {
+      const formatted = new Date(timestamp).toLocaleString()
+      showToast(`浏览器模式已启用，上次自动保存于 ${formatted}`)
+    } else {
+      showToast('浏览器模式已启用，内容会自动保存到本地存储')
+    }
+  } else {
+    showToast('浏览器模式已启用，内容会自动保存到本地存储')
+  }
+
+  executeWithEditor((editorInstance) => {
+    persistContentToLocalStorage(editorInstance.getValue())
+  })
+}
+
 // 页面加载完成后初始化编辑器
 document.addEventListener('DOMContentLoaded', () => {
   if (isDev) {
     console.info('Renderer DOMContentLoaded: initializing editor')
   }
   initEditor()
-  setupElectronHandlers()
+  if (isElectron) {
+    setupElectronHandlers()
+  } else {
+    setupBrowserFallbacks()
+  }
 })
+
+if (!isElectron && typeof document !== 'undefined') {
+  document.addEventListener('keydown', (event) => {
+    const key = event.key && event.key.toLowerCase()
+    if ((event.ctrlKey || event.metaKey) && key === 's') {
+      event.preventDefault()
+      showToast('请在桌面应用中使用保存功能以确保数据安全')
+    }
+  })
+}
+
+function markDirtyState(nextDirty) {
+  const normalized = Boolean(nextDirty)
+  if (isEditorDirty !== normalized) {
+    isEditorDirty = normalized
+
+    if (!isElectron && typeof document !== 'undefined') {
+      document.title = normalized ? `* ${DEFAULT_DOCUMENT_TITLE}` : DEFAULT_DOCUMENT_TITLE
+    }
+
+    if (window.electronAPI && typeof window.electronAPI.setDirty === 'function') {
+      try {
+        window.electronAPI.setDirty(normalized)
+      } catch (error) {
+        if (isDev) {
+          console.warn('Failed to update dirty state via Electron bridge:', error)
+        }
+      }
+    }
+  }
+
+  if (normalized) {
+    if (isElectron) {
+      scheduleAutoSave()
+    } else {
+      scheduleBrowserPersist()
+    }
+  } else if (isElectron) {
+    cancelAutoSave()
+  } else {
+    cancelBrowserPersist()
+    executeWithEditor((editorInstance) => {
+      persistContentToLocalStorage(editorInstance.getValue())
+    })
+  }
+}
+
+function withDirtyTrackingSuppressed(fn) {
+  suppressDirtyTracking = true
+  try {
+    return fn()
+  } finally {
+    suppressDirtyTracking = false
+  }
+}
+
+function sanitizeAltText(rawName) {
+  if (typeof rawName !== 'string' || rawName.length === 0) {
+    return 'image'
+  }
+
+  const cleaned = rawName
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\r\n]/g, ' ')
+    .replace(/[\[\]()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return cleaned.length > 0 ? cleaned.slice(0, MAX_ALT_TEXT_LENGTH) : 'image'
+}
+
+function cancelAutoSave() {
+  if (autoSaveTimer) {
+    window.clearTimeout(autoSaveTimer)
+    autoSaveTimer = null
+  }
+}
+
+function scheduleAutoSave() {
+  if (!isElectron || !window.electronAPI || !knownFilePath) {
+    return
+  }
+
+  const now = Date.now()
+  const elapsed = now - lastAutoSaveTimestamp
+  const minimumDelay = elapsed >= AUTO_SAVE_MIN_INTERVAL
+    ? AUTO_SAVE_DELAY
+    : Math.max(AUTO_SAVE_MIN_INTERVAL - elapsed, AUTO_SAVE_DELAY)
+
+  cancelAutoSave()
+
+  autoSaveTimer = window.setTimeout(() => {
+    autoSaveTimer = null
+    executeWithEditor(
+      async (editorInstance) => {
+        const content = editorInstance.getValue()
+        const result = await window.electronAPI.saveFile(content)
+        if (result?.success) {
+          knownFilePath = result.filePath || knownFilePath
+          lastAutoSaveTimestamp = Date.now()
+          markDirtyState(false)
+          if (isDev) {
+            console.info('Auto-saved file:', knownFilePath)
+          }
+        } else if (result && !result.canceled && result.error) {
+          showToast(`自动保存失败: ${result.error}`)
+        }
+      },
+      (error) => {
+        if (isDev) {
+          console.error('自动保存时发生错误:', error)
+        }
+        showToast(`自动保存失败: ${error?.message || '未知错误'}`)
+      }
+    )
+  }, minimumDelay)
+}
+
+function scheduleBrowserPersist() {
+  if (isElectron || !isBrowserStorageAvailable()) {
+    return
+  }
+
+  cancelBrowserPersist()
+  browserPersistTimer = window.setTimeout(() => {
+    browserPersistTimer = null
+    executeWithEditor((editorInstance) => {
+      const content = editorInstance.getValue()
+      persistContentToLocalStorage(content)
+    })
+  }, BROWSER_AUTO_SAVE_DELAY)
+}
+
+function cancelBrowserPersist() {
+  if (browserPersistTimer) {
+    window.clearTimeout(browserPersistTimer)
+    browserPersistTimer = null
+  }
+}
+
+function isBrowserStorageAvailable() {
+  if (isElectron || typeof window === 'undefined') {
+    return false
+  }
+
+  if (isLocalStorageAvailable !== null) {
+    return isLocalStorageAvailable
+  }
+
+  try {
+    const storage = window.localStorage
+    if (!storage) {
+      isLocalStorageAvailable = false
+      return false
+    }
+
+    const probeKey = '__wok_editor_probe__'
+    storage.setItem(probeKey, '1')
+    storage.removeItem(probeKey)
+    isLocalStorageAvailable = true
+  } catch (error) {
+    if (isDev) {
+      console.warn('localStorage is not available:', error)
+    }
+    isLocalStorageAvailable = false
+  }
+
+  return isLocalStorageAvailable
+}
+
+function readPersistedBrowserContent() {
+  if (!isBrowserStorageAvailable()) {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_CONTENT_KEY)
+    if (typeof raw !== 'string' || raw.length === 0) {
+      return null
+    }
+    if (raw.length > BROWSER_MAX_PERSISTED_CHAR_COUNT) {
+      window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
+      window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+      return null
+    }
+    return raw
+  } catch (error) {
+    if (isDev) {
+      console.warn('读取本地缓存内容失败:', error)
+    }
+    return null
+  }
+}
+
+function persistContentToLocalStorage(content) {
+  if (!isBrowserStorageAvailable() || typeof content !== 'string') {
+    return
+  }
+
+  if (content.length === 0) {
+    clearPersistedBrowserContent()
+    return
+  }
+
+  if (content.length > BROWSER_MAX_PERSISTED_CHAR_COUNT) {
+    if (!browserPersistOverflowNotified) {
+      showToast('内容超过浏览器本地缓存上限，已停止自动保存')
+      browserPersistOverflowNotified = true
+    }
+    return
+  }
+
+  browserPersistOverflowNotified = false
+
+  try {
+    window.localStorage.setItem(LOCAL_STORAGE_CONTENT_KEY, content)
+    window.localStorage.setItem(LOCAL_STORAGE_UPDATED_AT_KEY, String(Date.now()))
+  } catch (error) {
+    if (isDev) {
+      console.warn('保存内容到本地缓存失败:', error)
+    }
+  }
+}
+
+function clearPersistedBrowserContent() {
+  if (!isBrowserStorageAvailable()) {
+    return
+  }
+  try {
+    window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
+    window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+    browserPersistOverflowNotified = false
+  } catch (error) {
+    if (isDev) {
+      console.warn('清理本地缓存失败:', error)
+    }
+  }
+}
+
+async function executeWithEditor(executor, onError) {
+  try {
+    const editorInstance = await editorReadyPromise
+    if (!editorInstance) return
+    return await executor(editorInstance)
+  } catch (error) {
+    if (typeof onError === 'function') {
+      onError(error)
+    } else if (isDev) {
+      console.error('Editor handler execution failed:', error)
+    }
+    return undefined
+  }
+}

@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     outDir: 'dist',
-    sourcemap: mode !== 'production'
+    sourcemap: mode !== 'production',
+    chunkSizeWarningLimit: 1000
   }
 }))
