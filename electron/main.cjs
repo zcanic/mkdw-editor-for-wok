@@ -30,9 +30,7 @@ const forbiddenPathPrefixes = (isMac
 
 function assertSafeFilePath(targetPath) {
   if (!targetPath || typeof targetPath !== 'string') {
-    const error = new Error('无效的文件路径')
-    error.code = 'INVALID_PATH'
-    throw error
+    throw Object.assign(new Error('无效的文件路径'), { code: 'INVALID_PATH' });
   }
 
   const normalized = path.resolve(targetPath)
@@ -51,7 +49,7 @@ function assertSafeFilePath(targetPath) {
 }
 
 function translateFileSystemError(error) {
-  if (!error?.code) return '未知错误，请重试';
+  if (!error?.code) return error?.message || '未知错误，请重试';
 
   switch (error.code) {
     case 'ENOENT':
@@ -95,7 +93,9 @@ function handleFileOpenError(error) {
 }
 
 function buildSuccessResponse(filePath) {
-  currentFilePath = filePath; hasUnsavedChanges = false; pendingQuitAfterSave = false; updateWindowTitle();
+  currentFilePath = filePath;
+  hasUnsavedChanges = pendingQuitAfterSave = false;
+  updateWindowTitle();
   return { success: true, filePath };
 }
 

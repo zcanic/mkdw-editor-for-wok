@@ -17,5 +17,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFile: (content) => ipcRenderer.invoke('file:save', content),
   saveFileAs: (content) => ipcRenderer.invoke('file:save-as', content),
   autoSaveFile: (content) => ipcRenderer.invoke('file:auto-save', content),
-  setDirty: (isDirty) => ipcRenderer.send('file:set-dirty', Boolean(isDirty))
+  setDirty: (isDirty) => ipcRenderer.send('file:set-dirty', isDirty)
 })

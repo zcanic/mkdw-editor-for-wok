@@ -6,8 +6,7 @@ import 'vditor/dist/js/lute/lute.min.js'
 const isDev = import.meta.env.DEV
 const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI)
 const DEFAULT_DOCUMENT_TITLE = typeof document !== 'undefined' ? document.title : 'WOK Editor'
-const MAX_INLINE_IMAGE_SIZE_MB = 1,
-      MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024;
+const MAX_INLINE_IMAGE_SIZE = 1024 * 1024; // 1MB
 const TOAST_DISPLAY_DURATION = 2000
 const TOAST_TRANSITION_DURATION = 300
 const OUTLINE_MIN_WIDTH = 200
@@ -23,14 +22,9 @@ const LOCAL_STORAGE_KEYS = {
 const BROWSER_AUTO_SAVE_DELAY = 1500
 const BROWSER_MAX_PERSISTED_CHAR_COUNT = 700000
 
-let vditor = null
-let activeToast = null
-let toastHideTimer = null
-let toastRemoveTimer = null
-let teardownElectronHandlers = null
-let electronBeforeUnloadHandler = null
-let resolveEditorReady = () => {}
-let editorReadyPromise = Promise.resolve()
+let vditor = null, activeToast = null, toastHideTimer = null, toastRemoveTimer = null;
+let teardownElectronHandlers = null, electronBeforeUnloadHandler = null;
+let resolveEditorReady = () => {}, editorReadyPromise = Promise.resolve();
 let isEditorDirty = false
 let suppressDirtyTracking = false
 let knownFilePath = null
@@ -242,7 +236,7 @@ function initEditor() {
               messages.push(`已插入${successCount}张图片`)
             }
             if (oversized.length > 0) {
-              messages.push(`以下图片超过 ${MAX_INLINE_IMAGE_SIZE_MB}MB 未插入：${oversized.join('、')}`)
+              messages.push(`以下图片超过 1MB 未插入：${oversized.join('、')}`)
             }
             if (failed.length > 0) {
               messages.push(`以下图片读取失败：${failed.join('、')}`)
@@ -856,7 +850,7 @@ function showToast(message) {
 
 // Electron 文件操作功能
 function setupElectronHandlers() {
-  if (!isElectron || !window.electronAPI) {
+  if (!isElectron) {
     if (isDev) {
       console.info('Electron API bridge is not available on window, skipping IPC handlers')
     }
@@ -894,7 +888,7 @@ function setupElectronHandlers() {
         if (!data?.content) {
           return
         }
-        knownFilePath = typeof data.filePath === 'string' && data.filePath.length > 0 ? data.filePath : null
+        knownFilePath = data.filePath || null
         cancelAutoSave()
         withDirtyTrackingSuppressed(() => {
           editorInstance.setValue(data.content)
@@ -1096,12 +1090,8 @@ function sanitizeAltText(rawName) {
     return 'image'
   }
 
-  const cleaned = rawName
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/[\r\n]/g, ' ')
-    .replace(/[\[\]()]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  const cleaned = rawName.replace(/[\u0000-\u001f\u007f\r\n]/g, ' ')
+    .replace(/[\[\]()]/g, '').replace(/\s+/g, ' ').trim();
 
   return cleaned.length > 0 ? cleaned.slice(0, MAX_ALT_TEXT_LENGTH) : 'image'
 }
@@ -1120,9 +1110,7 @@ function scheduleAutoSave() {
 
   const now = Date.now()
   const elapsed = now - lastAutoSaveTimestamp
-  const minimumDelay = elapsed >= AUTO_SAVE_MIN_INTERVAL
-    ? AUTO_SAVE_DELAY
-    : Math.max(AUTO_SAVE_MIN_INTERVAL - elapsed, AUTO_SAVE_DELAY)
+  const minimumDelay = Math.max(AUTO_SAVE_DELAY, AUTO_SAVE_MIN_INTERVAL - elapsed);
 
   cancelAutoSave()
 
@@ -1142,9 +1130,7 @@ function scheduleAutoSave() {
 
         if (result?.success) {
           // 只有在保存到原文件时才更新knownFilePath
-          if (knownFilePath) {
-            knownFilePath = result.filePath || knownFilePath
-          }
+          knownFilePath &&= result.filePath || knownFilePath;
           lastAutoSaveTimestamp = Date.now()
           markDirtyState(false)
           if (isDev) {
