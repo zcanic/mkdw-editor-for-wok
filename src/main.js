@@ -6,8 +6,8 @@ import 'vditor/dist/js/lute/lute.min.js'
 const isDev = import.meta.env.DEV
 const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI)
 const DEFAULT_DOCUMENT_TITLE = typeof document !== 'undefined' ? document.title : 'WOK Editor'
-const MAX_INLINE_IMAGE_SIZE_MB = 1
-const MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024
+const MAX_INLINE_IMAGE_SIZE_MB = 1,
+      MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024;
 const TOAST_DISPLAY_DURATION = 2000
 const TOAST_TRANSITION_DURATION = 300
 const OUTLINE_MIN_WIDTH = 200
@@ -17,8 +17,9 @@ const MAX_CONCURRENT_FILE_READS = 3
 const MAX_ALT_TEXT_LENGTH = 100
 const AUTO_SAVE_DELAY = 3000
 const AUTO_SAVE_MIN_INTERVAL = 10000
-const LOCAL_STORAGE_CONTENT_KEY = 'wok-editor:last-content'
-const LOCAL_STORAGE_UPDATED_AT_KEY = 'wok-editor:last-updated'
+const LOCAL_STORAGE_KEYS = {
+  CONTENT: 'wok-editor:last-content', UPDATED_AT: 'wok-editor:last-updated'
+};
 const BROWSER_AUTO_SAVE_DELAY = 1500
 const BROWSER_MAX_PERSISTED_CHAR_COUNT = 700000
 
@@ -170,11 +171,8 @@ function hello() {
 ;
 
 function getInitialEditorContent() {
-  const restored = !isElectron ? readPersistedBrowserContent() : null
-  if (typeof restored === 'string' && restored.length > 0) {
-    return restored
-  }
-  return defaultContent
+  const restored = !isElectron && readPersistedBrowserContent();
+  return typeof restored === 'string' && restored.length > 0 ? restored : defaultContent;
 }
 
 // 初始化编辑器
@@ -1007,7 +1005,7 @@ function setupBrowserFallbacks() {
     return
   }
 
-  const lastPersistedAtRaw = window.localStorage.getItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+  const lastPersistedAtRaw = window.localStorage.getItem(LOCAL_STORAGE_KEYS.UPDATED_AT)
   if (lastPersistedAtRaw) {
     const timestamp = Number(lastPersistedAtRaw)
     if (!Number.isNaN(timestamp) && timestamp > 0) {
@@ -1224,13 +1222,13 @@ function readPersistedBrowserContent() {
   }
 
   try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_CONTENT_KEY)
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_KEYS.CONTENT)
     if (typeof raw !== 'string' || raw.length === 0) {
       return null
     }
     if (raw.length > BROWSER_MAX_PERSISTED_CHAR_COUNT) {
-      window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
-      window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+      window.localStorage.removeItem(LOCAL_STORAGE_KEYS.CONTENT)
+      window.localStorage.removeItem(LOCAL_STORAGE_KEYS.UPDATED_AT)
       return null
     }
     return raw
@@ -1263,8 +1261,8 @@ function persistContentToLocalStorage(content) {
   browserPersistOverflowNotified = false
 
   try {
-    window.localStorage.setItem(LOCAL_STORAGE_CONTENT_KEY, content)
-    window.localStorage.setItem(LOCAL_STORAGE_UPDATED_AT_KEY, String(Date.now()))
+    window.localStorage.setItem(LOCAL_STORAGE_KEYS.CONTENT, content)
+    window.localStorage.setItem(LOCAL_STORAGE_KEYS.UPDATED_AT, String(Date.now()))
   } catch (error) {
     if (isDev) {
       console.warn('保存内容到本地缓存失败:', error)
@@ -1277,8 +1275,8 @@ function clearPersistedBrowserContent() {
     return
   }
   try {
-    window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
-    window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+    window.localStorage.removeItem(LOCAL_STORAGE_KEYS.CONTENT)
+    window.localStorage.removeItem(LOCAL_STORAGE_KEYS.UPDATED_AT)
     browserPersistOverflowNotified = false
   } catch (error) {
     if (isDev) {

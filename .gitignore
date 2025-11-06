@@ -19,3 +19,4 @@ yarn-error.log*
 # Editor artifacts
 .vscode/
 .idea/
+/.claude

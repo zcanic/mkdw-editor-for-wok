@@ -51,9 +51,7 @@ function assertSafeFilePath(targetPath) {
 }
 
 function translateFileSystemError(error) {
-  if (!error || typeof error !== 'object') {
-    return '未知错误，请重试'
-  }
+  if (!error?.code) return '未知错误，请重试';
 
   switch (error.code) {
     case 'ENOENT':
@@ -78,13 +76,27 @@ function translateFileSystemError(error) {
 
 function buildErrorResponse(error) {
   const message = translateFileSystemError(error)
-  const code = error && typeof error.code === 'string' ? error.code : 'UNKNOWN'
+  const code = error?.code || 'UNKNOWN'
   return {
     success: false,
     error: message,
     code,
-    stack: isDev && error && typeof error.stack === 'string' ? error.stack : undefined
+    stack: isDev && error?.stack ? error.stack : undefined
   }
+}
+
+function handleFileOpenError(error) {
+  if (error.code === 'FILE_TOO_LARGE') {
+    const sizeInMb = (error.size / (1024 * 1024)).toFixed(1)
+    dialog.showErrorBox('打开文件失败', `文件大小为 ${sizeInMb} MB，超过 ${MAX_RENDERER_FILE_SIZE / (1024 * 1024)} MB 限制。`)
+  } else {
+    dialog.showErrorBox('打开文件失败', translateFileSystemError(error))
+  }
+}
+
+function buildSuccessResponse(filePath) {
+  currentFilePath = filePath; hasUnsavedChanges = false; pendingQuitAfterSave = false; updateWindowTitle();
+  return { success: true, filePath };
 }
 
 function resolvePreloadPath() {
@@ -234,14 +246,8 @@ function createWindow() {
 }
 
 function toggleDevTools(windowInstance) {
-  if (!windowInstance || windowInstance.isDestroyed()) {
-    return
-  }
-
-  const { webContents } = windowInstance
-  if (!webContents) {
-    return
-  }
+  if (!windowInstance?.webContents || windowInstance.isDestroyed()) return;
+  const { webContents } = windowInstance;
 
   if (webContents.isDevToolsOpened()) {
     webContents.closeDevTools()
@@ -332,20 +338,16 @@ async function handleOpenFileDialog() {
     updateWindowTitle()
     sendToRenderer('menu:open-file', { filePath: normalizedPath, content })
   } catch (error) {
-    if (error.code === 'FILE_TOO_LARGE') {
-      const sizeInMb = (error.size / (1024 * 1024)).toFixed(1)
-      dialog.showErrorBox('打开文件失败', `文件大小为 ${sizeInMb} MB，超过 ${MAX_RENDERER_FILE_SIZE / (1024 * 1024)} MB 限制。`)
-    } else {
-      dialog.showErrorBox('打开文件失败', translateFileSystemError(error))
-    }
+    handleFileOpenError(error)
   }
 }
 
+function resetEditorState() {
+  currentFilePath = null; hasUnsavedChanges = false; pendingQuitAfterSave = false; updateWindowTitle();
+}
+
 function handleNewFile() {
-  currentFilePath = null
-  hasUnsavedChanges = false
-  pendingQuitAfterSave = false
-  updateWindowTitle()
+  resetEditorState()
   sendToRenderer('menu:new-file')
 }
 
@@ -443,11 +445,7 @@ function registerIpcHandlers() {
       }
 
       const normalizedPath = await writeContentToFile(targetPath, content)
-      currentFilePath = normalizedPath
-      hasUnsavedChanges = false
-      pendingQuitAfterSave = false
-      updateWindowTitle()
-      return { success: true, filePath: normalizedPath }
+      return buildSuccessResponse(normalizedPath)
     } catch (error) {
       console.error('保存文件失败:', error)
       return buildErrorResponse(error)
@@ -462,11 +460,7 @@ function registerIpcHandlers() {
       }
 
       const normalizedPath = await writeContentToFile(targetPath, content)
-      currentFilePath = normalizedPath
-      hasUnsavedChanges = false
-      pendingQuitAfterSave = false
-      updateWindowTitle()
-      return { success: true, filePath: normalizedPath }
+      return buildSuccessResponse(normalizedPath)
     } catch (error) {
       console.error('另存为失败:', error)
       return buildErrorResponse(error)
@@ -588,12 +582,7 @@ app.on('open-file', (_event, filePath) => {
       updateWindowTitle()
       sendToRenderer('menu:open-file', { filePath: normalizedPath, content })
     } catch (error) {
-      if (error.code === 'FILE_TOO_LARGE') {
-        const sizeInMb = (error.size / (1024 * 1024)).toFixed(1)
-        dialog.showErrorBox('打开文件失败', `文件大小为 ${sizeInMb} MB，超过 ${MAX_RENDERER_FILE_SIZE / (1024 * 1024)} MB 限制。`)
-      } else {
-        dialog.showErrorBox('打开文件失败', translateFileSystemError(error))
-      }
+      handleFileOpenError(error)
     }
   })()
 })
