@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm run electron:dev)",
+      "Bash(git add \"性能/补充问题.md\")",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: 添加性能补充问题文档\n\n- 新增性能优化补充问题分析文档\n- 包含架构和逻辑问题的补充说明\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push)",
+      "Bash(git add .)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: 完成代码质量检查并优化应用\n\n- 修复CSP策略冲突问题\n- 优化Electron打包配置\n- 完善错误处理和用户反馈机制\n- 增强文件操作安全性\n- 改进自动保存和脏状态管理\n- 添加详细的代码质量检查报告\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(cat \"性能/补充问题.md\")",
+      "Bash(electron .)",
+      "Bash(npm run dev)",
+      "Bash(git pull:*)",
+      "Bash(ping:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

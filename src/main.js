@@ -1116,7 +1116,7 @@ function cancelAutoSave() {
 }
 
 function scheduleAutoSave() {
-  if (!isElectron || !window.electronAPI || !knownFilePath) {
+  if (!isElectron || !window.electronAPI) {
     return
   }
 
@@ -1133,13 +1133,24 @@ function scheduleAutoSave() {
     executeWithEditor(
       async (editorInstance) => {
         const content = editorInstance.getValue()
-        const result = await window.electronAPI.saveFile(content)
+
+        // 如果有已知文件路径，保存到原文件；否则保存到autosave文件夹
+        let result
+        if (knownFilePath) {
+          result = await window.electronAPI.saveFile(content)
+        } else {
+          result = await window.electronAPI.autoSaveFile(content)
+        }
+
         if (result?.success) {
-          knownFilePath = result.filePath || knownFilePath
+          // 只有在保存到原文件时才更新knownFilePath
+          if (knownFilePath) {
+            knownFilePath = result.filePath || knownFilePath
+          }
           lastAutoSaveTimestamp = Date.now()
           markDirtyState(false)
           if (isDev) {
-            console.info('Auto-saved file:', knownFilePath)
+            console.info('Auto-saved file:', result.filePath)
           }
         } else if (result && !result.canceled && result.error) {
           showToast(`自动保存失败: ${result.error}`)
