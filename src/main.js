@@ -321,6 +321,8 @@ function initEditor() {
           enable: true,
           style: 'github',
           lineNumber: true,
+          // 禁用动态加载语言库（会触发 CSP 违规）
+          langs: [],
           // Override Vditor's default copy button renderer to avoid inline event handlers
           renderMenu: (codeEl, copyContainer) => {
             try {
@@ -392,7 +394,14 @@ function initEditor() {
         },
         math: {
           engine: 'KaTeX',
+          // 禁用动态加载（已在本地打包）
+          inlineDigit: false,
         },
+        // 禁用所有可能触发动态脚本的渲染器
+        speech: {
+          enable: false,
+        },
+        anchor: 0,
         // Sanitize the generated HTML before Vditor runs its renderers, to avoid
         // CSP-unsafe features (remote PlantUML, eval-based ECharts) and keep everything local.
         transform: (html) => {
