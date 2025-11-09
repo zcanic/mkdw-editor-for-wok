@@ -3,29 +3,36 @@ import 'vditor/dist/index.css'
 import 'vditor/dist/js/i18n/zh_CN'
 import 'vditor/dist/js/lute/lute.min.js'
 
-const isDev = import.meta.env.DEV
-const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI)
-const DEFAULT_DOCUMENT_TITLE = typeof document !== 'undefined' ? document.title : 'WOK Editor'
-const MAX_INLINE_IMAGE_SIZE_MB = 1
-const MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024
-const TOAST_DISPLAY_DURATION = 2000
-const TOAST_TRANSITION_DURATION = 300
-const OUTLINE_MIN_WIDTH = 200
-const OUTLINE_MAX_WIDTH = 600
-const PREVIEW_RENDER_DELAY = 150
-const MAX_CONCURRENT_FILE_READS = 3
-const MAX_ALT_TEXT_LENGTH = 100
-const AUTO_SAVE_DELAY = 3000
-const AUTO_SAVE_MIN_INTERVAL = 10000
-const LOCAL_STORAGE_CONTENT_KEY = 'wok-editor:last-content'
-const LOCAL_STORAGE_UPDATED_AT_KEY = 'wok-editor:last-updated'
-const BROWSER_AUTO_SAVE_DELAY = 1500
-const BROWSER_MAX_PERSISTED_CHAR_COUNT = 700000
+// 导入模块
+import {
+  isDev,
+  isElectron,
+  DEFAULT_DOCUMENT_TITLE,
+  MAX_INLINE_IMAGE_SIZE_MB,
+  MAX_INLINE_IMAGE_SIZE,
+  TOAST_DISPLAY_DURATION,
+  TOAST_TRANSITION_DURATION,
+  OUTLINE_MIN_WIDTH,
+  OUTLINE_MAX_WIDTH,
+  PREVIEW_RENDER_DELAY,
+  MAX_CONCURRENT_FILE_READS,
+  MAX_ALT_TEXT_LENGTH,
+  AUTO_SAVE_DELAY,
+  AUTO_SAVE_MIN_INTERVAL,
+  LOCAL_STORAGE_CONTENT_KEY,
+  LOCAL_STORAGE_UPDATED_AT_KEY,
+  BROWSER_AUTO_SAVE_DELAY,
+  BROWSER_MAX_PERSISTED_CHAR_COUNT
+} from './core/constants.js'
+import { showToast } from './ui/toast.js'
+import {
+  installInlineEventAttributeGuard,
+  sanitizeInlineHandlers,
+  observeAndSanitizeInlineHandlers,
+  sanitizeAltText
+} from './ui/sanitizer.js'
 
 let vditor = null
-let activeToast = null
-let toastHideTimer = null
-let toastRemoveTimer = null
 let teardownElectronHandlers = null
 let electronBeforeUnloadHandler = null
 let resolveEditorReady = () => {}
@@ -39,68 +46,9 @@ let browserPersistTimer = null
 let browserPersistOverflowNotified = false
 let isLocalStorageAvailable = null
 const vditorLocale = typeof window !== 'undefined' && window.VditorI18n ? window.VditorI18n : undefined
-let inlineEventGuardInstalled = false
 
 if (typeof window !== 'undefined' && vditorLocale) {
   window.VditorI18n = vditorLocale
-}
-
-function installInlineEventAttributeGuard() {
-  if (inlineEventGuardInstalled) {
-    return
-  }
-
-  if (typeof Element === 'undefined') {
-    return
-  }
-
-  // Acquire descriptor from Element.prototype first, fallback to HTMLElement.prototype for older engines.
-  const descriptorInfo = (() => {
-    const elementDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML')
-    if (elementDescriptor) {
-      return { descriptor: elementDescriptor, target: Element.prototype }
-    }
-    if (typeof HTMLElement !== 'undefined') {
-      const htmlDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerHTML')
-      if (htmlDescriptor) {
-        return { descriptor: htmlDescriptor, target: HTMLElement.prototype }
-      }
-    }
-    return null
-  })()
-
-  if (!descriptorInfo || typeof descriptorInfo.descriptor.set !== 'function') {
-    return
-  }
-
-  const { descriptor, target } = descriptorInfo
-  const originalSetter = descriptor.set
-  const originalGetter = descriptor.get
-
-  try {
-    Object.defineProperty(target, 'innerHTML', {
-      configurable: descriptor.configurable,
-      enumerable: descriptor.enumerable,
-      get: originalGetter,
-      set(value) {
-        let nextValue = value
-
-        if (typeof nextValue === 'string' && nextValue.includes('vditor') && /\son[a-z]+\s*=\s*/i.test(nextValue)) {
-          // Strip all inline event attributes to comply with strict CSP.
-          nextValue = nextValue
-            .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, ' ')
-            .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, ' ')
-            .replace(/\s{2,}/g, ' ')
-        }
-
-        return originalSetter.call(this, nextValue)
-      }
-    })
-
-    inlineEventGuardInstalled = true
-  } catch (_err) {
-    // Ignore descriptor redefinition failures (older browsers), fallback to runtime sanitization instead.
-  }
 }
 
 function resetEditorReadyPromise() {
@@ -607,87 +555,6 @@ function fixPreviewTooltipBehavior() {
   disablePreviewTooltip()
 }
 
-// Remove CSP-unsafe inline event handlers from Vditor UI (e.g., copy buttons),
-// and reattach safe listeners.
-function sanitizeInlineHandlers(root = document) {
-  try {
-    const buttons = root.querySelectorAll('.vditor-copy > span')
-    buttons.forEach((btn) => {
-      if (btn.__wokSanitized) return
-      btn.removeAttribute('onclick')
-      btn.removeAttribute('onmouseover')
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        const textarea = btn.previousElementSibling
-        if (textarea && typeof textarea.select === 'function') {
-          textarea.select()
-          try {
-            document.execCommand('copy')
-          } catch (_err) { /* noop */ }
-          try {
-            const sel = window.getSelection && window.getSelection()
-            sel && sel.removeAllRanges && sel.removeAllRanges()
-          } catch (_err) { /* noop */ }
-          btn.setAttribute('aria-label', '已复制')
-          if (typeof textarea.blur === 'function') textarea.blur()
-        }
-      })
-      btn.addEventListener('mouseover', () => {
-        btn.setAttribute('aria-label', '复制')
-      })
-      btn.__wokSanitized = true
-    })
-
-    // Sanitize image preview overlay injected by Vditor (removes inline onclicks)
-    const overlays = root.querySelectorAll('.vditor-img')
-    overlays.forEach((overlay) => {
-      if (overlay.__wokSanitized) return
-      // Close areas with inline handlers
-      const closeBtn = overlay.querySelector('.vditor-img__bar > .vditor-img__btn:nth-child(2)')
-      const clickArea = overlay.querySelector('.vditor-img__img')
-      const doClose = () => {
-        try { document.body.style.overflow = '' } catch (_) {}
-        if (overlay && overlay.parentElement) {
-          overlay.parentElement.removeChild(overlay)
-        }
-      }
-      if (closeBtn) {
-        closeBtn.removeAttribute('onclick')
-        closeBtn.addEventListener('click', (e) => { e.stopPropagation(); doClose() })
-      }
-      if (clickArea) {
-        clickArea.removeAttribute('onclick')
-        clickArea.addEventListener('click', (e) => { e.stopPropagation(); doClose() })
-      }
-      overlay.__wokSanitized = true
-    })
-  } catch (_e) {
-    // no-op
-  }
-}
-
-function observeAndSanitizeInlineHandlers() {
-  const editor = document.getElementById('vditor')
-  const roots = [document.body]
-  if (editor) roots.push(editor)
-
-  const mo = new MutationObserver((mutations) => {
-    for (const m of mutations) {
-      if (m.type === 'childList') {
-        m.addedNodes.forEach((node) => {
-          if (node && node.querySelectorAll) {
-            sanitizeInlineHandlers(node)
-          }
-        })
-      }
-    }
-  })
-  roots.forEach((root) => {
-    mo.observe(root, { childList: true, subtree: true })
-    sanitizeInlineHandlers(root)
-  })
-}
-
 // 可拖动边界功能
 function initOutlineResizer() {
   const editorElement = document.getElementById('vditor')
@@ -799,61 +666,6 @@ function initOutlineResizer() {
   observer.observe(editorElement, { childList: true, subtree: false })
 
   visitOutlineNodes(editorElement, ensureResizer)
-}
-
-
-// 显示提示消息
-function showToast(message) {
-  if (!message) return
-
-  if (activeToast && activeToast.parentElement) {
-    activeToast.parentElement.removeChild(activeToast)
-  }
-
-  window.clearTimeout(toastHideTimer)
-  window.clearTimeout(toastRemoveTimer)
-  toastHideTimer = null
-  toastRemoveTimer = null
-
-  const toast = document.createElement('div')
-  toast.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: #333;
-    color: #fff;
-    padding: 12px 20px;
-    border-radius: 6px;
-    font-size: 14px;
-    z-index: 1000;
-    opacity: 0;
-    transform: translateY(-10px);
-    transition: opacity 0.3s ease, transform 0.3s ease;
-    white-space: pre-line;
-  `
-  toast.textContent = message
-  document.body.appendChild(toast)
-
-  // 使用 requestAnimationFrame 确保元素已插入后再执行动画
-  requestAnimationFrame(() => {
-    toast.style.opacity = '1'
-    toast.style.transform = 'translateY(0)'
-  })
-
-  toastHideTimer = window.setTimeout(() => {
-    toast.style.opacity = '0'
-    toast.style.transform = 'translateY(-10px)'
-    toastRemoveTimer = window.setTimeout(() => {
-      if (toast.parentElement) {
-        toast.parentElement.removeChild(toast)
-      }
-      if (activeToast === toast) {
-        activeToast = null
-      }
-    }, TOAST_TRANSITION_DURATION)
-  }, TOAST_DISPLAY_DURATION)
-
-  activeToast = toast
 }
 
 // Electron 文件操作功能
@@ -1091,21 +903,6 @@ function withDirtyTrackingSuppressed(fn) {
   } finally {
     suppressDirtyTracking = false
   }
-}
-
-function sanitizeAltText(rawName) {
-  if (typeof rawName !== 'string' || rawName.length === 0) {
-    return 'image'
-  }
-
-  const cleaned = rawName
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/[\r\n]/g, ' ')
-    .replace(/[\[\]()]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return cleaned.length > 0 ? cleaned.slice(0, MAX_ALT_TEXT_LENGTH) : 'image'
 }
 
 function cancelAutoSave() {
