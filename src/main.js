@@ -135,6 +135,23 @@ function initEditor() {
   }
 
   installInlineEventAttributeGuard()
+  
+  // 拦截可能的动态脚本注入（来自 Vditor 内部）
+  if (typeof window !== 'undefined' && !window.__vditorScriptIntercepted) {
+    window.__vditorScriptIntercepted = true
+    
+    // 拦截 document.write（Vditor 某些版本可能使用）
+    const originalDocWrite = document.write
+    document.write = function(...args) {
+      // 忽略包含 script 标签的写入
+      const content = args.join('')
+      if (/<script/i.test(content)) {
+        console.warn('[CSP] Blocked document.write with script tag')
+        return
+      }
+      return originalDocWrite.apply(document, args)
+    }
+  }
 
   try {
     const initialValue = getInitialEditorContent()
@@ -145,7 +162,9 @@ function initEditor() {
       placeholder: '开始写作...',
       value: initialValue,
       lang: 'zh_CN',
-  i18n: vditorLocale,
+      i18n: vditorLocale,
+      // 禁用所有可能触发动态脚本的功能
+      _lutePath: '',  // 禁用 Lute 动态加载
       input: () => {
         if (!suppressDirtyTracking) {
           markDirtyState(true)
@@ -317,6 +336,7 @@ function initEditor() {
       },
       preview: {
         delay: PREVIEW_RENDER_DELAY,
+        mode: 'light',  // 使用轻量级渲染模式
         hljs: {
           enable: true,
           style: 'github',
@@ -456,6 +476,15 @@ function initEditor() {
       },
       after: () => {
         // 编辑器初始化完成后的回调
+        
+        // 禁用 Vditor 内部可能触发动态脚本的函数
+        if (vditor && vditor.lute && vditor.lute.SetJSRenderers) {
+          try {
+            // 覆盖可能使用 eval 或 Function 的渲染器
+            vditor.lute.SetJSRenderers = () => {}
+          } catch (_) {}
+        }
+        
         initOutlineResizer()
         fixPreviewTooltipBehavior()
         // Sanitize any inline event handlers Vditor may have injected (e.g., copy buttons)
