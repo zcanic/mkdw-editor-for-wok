@@ -24,6 +24,18 @@ import {
   BROWSER_AUTO_SAVE_DELAY,
   BROWSER_MAX_PERSISTED_CHAR_COUNT
 } from './core/constants.js'
+import {
+  getEditorDirty,
+  getSuppressDirtyTracking,
+  setSuppressDirtyTracking,
+  getKnownFilePath,
+  setKnownFilePath,
+  getAutoSaveTimer,
+  setAutoSaveTimer,
+  getLastAutoSaveTimestamp,
+  setLastAutoSaveTimestamp,
+  markDirtyState as setDirtyState
+} from './core/state.js'
 import { showToast } from './ui/toast.js'
 import {
   installInlineEventAttributeGuard,
@@ -38,11 +50,6 @@ let teardownElectronHandlers = null
 let electronBeforeUnloadHandler = null
 let resolveEditorReady = () => {}
 let editorReadyPromise = Promise.resolve()
-let isEditorDirty = false
-let suppressDirtyTracking = false
-let knownFilePath = null
-let autoSaveTimer = null
-let lastAutoSaveTimestamp = 0
 let browserPersistTimer = null
 let browserPersistOverflowNotified = false
 let isLocalStorageAvailable = null
@@ -167,7 +174,7 @@ function initEditor() {
       // 禁用所有可能触发动态脚本的功能
       _lutePath: '',  // 禁用 Lute 动态加载
       input: () => {
-        if (!suppressDirtyTracking) {
+        if (!getSuppressDirtyTracking()) {
           markDirtyState(true)
         }
       },
@@ -618,7 +625,7 @@ function setupElectronHandlers() {
   register(
     window.electronAPI.onNewFile(() =>
       executeWithEditor((editorInstance) => {
-        knownFilePath = null
+        setKnownFilePath(null)
         cancelAutoSave()
         withDirtyTrackingSuppressed(() => {
           editorInstance.setValue('')
@@ -635,7 +642,7 @@ function setupElectronHandlers() {
         if (!data?.content) {
           return
         }
-        knownFilePath = typeof data.filePath === 'string' && data.filePath.length > 0 ? data.filePath : null
+        setKnownFilePath(data.filePath)
         cancelAutoSave()
         withDirtyTrackingSuppressed(() => {
           editorInstance.setValue(data.content)
@@ -657,8 +664,8 @@ function setupElectronHandlers() {
           const content = editorInstance.getValue()
           const result = await window.electronAPI.saveFile(content)
           if (result?.success) {
-            knownFilePath = result.filePath || knownFilePath
-            lastAutoSaveTimestamp = Date.now()
+            setKnownFilePath(result.filePath || getKnownFilePath())
+            setLastAutoSaveTimestamp(Date.now())
             markDirtyState(false)
             showToast(`文件已保存: ${result.filePath}`)
           } else if (result && !result.canceled && result.error) {
@@ -682,8 +689,8 @@ function setupElectronHandlers() {
           const content = editorInstance.getValue()
           const result = await window.electronAPI.saveFileAs(content)
           if (result?.success) {
-            knownFilePath = result.filePath || knownFilePath
-            lastAutoSaveTimestamp = Date.now()
+            setKnownFilePath(result.filePath || getKnownFilePath())
+            setLastAutoSaveTimestamp(Date.now())
             markDirtyState(false)
             showToast(`文件已另存为: ${result.filePath}`)
           } else if (result && !result.canceled && result.error) {
@@ -787,25 +794,10 @@ if (!isElectron && typeof document !== 'undefined') {
   })
 }
 
+// 标记脏状态并触发自动保存
 function markDirtyState(nextDirty) {
+  setDirtyState(nextDirty)
   const normalized = Boolean(nextDirty)
-  if (isEditorDirty !== normalized) {
-    isEditorDirty = normalized
-
-    if (!isElectron && typeof document !== 'undefined') {
-      document.title = normalized ? `* ${DEFAULT_DOCUMENT_TITLE}` : DEFAULT_DOCUMENT_TITLE
-    }
-
-    if (window.electronAPI && typeof window.electronAPI.setDirty === 'function') {
-      try {
-        window.electronAPI.setDirty(normalized)
-      } catch (error) {
-        if (isDev) {
-          console.warn('Failed to update dirty state via Electron bridge:', error)
-        }
-      }
-    }
-  }
 
   if (normalized) {
     if (isElectron) {
@@ -824,46 +816,47 @@ function markDirtyState(nextDirty) {
 }
 
 function withDirtyTrackingSuppressed(fn) {
-  suppressDirtyTracking = true
+  setSuppressDirtyTracking(true)
   try {
     return fn()
   } finally {
-    suppressDirtyTracking = false
+    setSuppressDirtyTracking(false)
   }
 }
 
 function cancelAutoSave() {
-  if (autoSaveTimer) {
-    window.clearTimeout(autoSaveTimer)
-    autoSaveTimer = null
+  const timer = getAutoSaveTimer()
+  if (timer) {
+    window.clearTimeout(timer)
+    setAutoSaveTimer(null)
   }
 }
 
 function scheduleAutoSave() {
-  if (!isElectron || !window.electronAPI || !knownFilePath) {
+  if (!isElectron || !window.electronAPI || !getKnownFilePath()) {
     return
   }
 
   const now = Date.now()
-  const elapsed = now - lastAutoSaveTimestamp
+  const elapsed = now - getLastAutoSaveTimestamp()
   const minimumDelay = elapsed >= AUTO_SAVE_MIN_INTERVAL
     ? AUTO_SAVE_DELAY
     : Math.max(AUTO_SAVE_MIN_INTERVAL - elapsed, AUTO_SAVE_DELAY)
 
   cancelAutoSave()
 
-  autoSaveTimer = window.setTimeout(() => {
-    autoSaveTimer = null
+  const timer = window.setTimeout(() => {
+    setAutoSaveTimer(null)
     executeWithEditor(
       async (editorInstance) => {
         const content = editorInstance.getValue()
         const result = await window.electronAPI.saveFile(content)
         if (result?.success) {
-          knownFilePath = result.filePath || knownFilePath
-          lastAutoSaveTimestamp = Date.now()
+          setKnownFilePath(result.filePath || getKnownFilePath())
+          setLastAutoSaveTimestamp(Date.now())
           markDirtyState(false)
           if (isDev) {
-            console.info('Auto-saved file:', knownFilePath)
+            console.info('Auto-saved file:', getKnownFilePath())
           }
         } else if (result && !result.canceled && result.error) {
           showToast(`自动保存失败: ${result.error}`)
@@ -877,6 +870,7 @@ function scheduleAutoSave() {
       }
     )
   }, minimumDelay)
+  setAutoSaveTimer(timer)
 }
 
 function scheduleBrowserPersist() {
