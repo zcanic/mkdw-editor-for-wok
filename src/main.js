@@ -412,10 +412,9 @@ function initEditor() {
           footnotes: true,
           autoSpace: true,
         },
+        // 完全禁用数学公式渲染以避免 CSP 违规（Vditor 会动态加载 MathJax）
         math: {
-          engine: 'KaTeX',
-          // 禁用动态加载（已在本地打包）
-          inlineDigit: false,
+          enable: false,
         },
         // 禁用所有可能触发动态脚本的渲染器
         speech: {
