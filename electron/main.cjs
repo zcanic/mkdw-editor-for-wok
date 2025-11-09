@@ -30,7 +30,9 @@ const forbiddenPathPrefixes = (isMac
 
 function assertSafeFilePath(targetPath) {
   if (!targetPath || typeof targetPath !== 'string') {
-    throw Object.assign(new Error('无效的文件路径'), { code: 'INVALID_PATH' });
+    const error = new Error('无效的文件路径')
+    error.code = 'INVALID_PATH'
+    throw error
   }
 
   const normalized = path.resolve(targetPath)
@@ -49,7 +51,9 @@ function assertSafeFilePath(targetPath) {
 }
 
 function translateFileSystemError(error) {
-  if (!error?.code) return error?.message || '未知错误，请重试';
+  if (!error || typeof error !== 'object') {
+    return '未知错误，请重试'
+  }
 
   switch (error.code) {
     case 'ENOENT':
@@ -74,29 +78,13 @@ function translateFileSystemError(error) {
 
 function buildErrorResponse(error) {
   const message = translateFileSystemError(error)
-  const code = error?.code || 'UNKNOWN'
+  const code = error && typeof error.code === 'string' ? error.code : 'UNKNOWN'
   return {
     success: false,
     error: message,
     code,
-    stack: isDev && error?.stack ? error.stack : undefined
+    stack: isDev && error && typeof error.stack === 'string' ? error.stack : undefined
   }
-}
-
-function handleFileOpenError(error) {
-  if (error.code === 'FILE_TOO_LARGE') {
-    const sizeInMb = (error.size / (1024 * 1024)).toFixed(1)
-    dialog.showErrorBox('打开文件失败', `文件大小为 ${sizeInMb} MB，超过 ${MAX_RENDERER_FILE_SIZE / (1024 * 1024)} MB 限制。`)
-  } else {
-    dialog.showErrorBox('打开文件失败', translateFileSystemError(error))
-  }
-}
-
-function buildSuccessResponse(filePath) {
-  currentFilePath = filePath;
-  hasUnsavedChanges = pendingQuitAfterSave = false;
-  updateWindowTitle();
-  return { success: true, filePath };
 }
 
 function resolvePreloadPath() {
@@ -246,8 +234,14 @@ function createWindow() {
 }
 
 function toggleDevTools(windowInstance) {
-  if (!windowInstance?.webContents || windowInstance.isDestroyed()) return;
-  const { webContents } = windowInstance;
+  if (!windowInstance || windowInstance.isDestroyed()) {
+    return
+  }
+
+  const { webContents } = windowInstance
+  if (!webContents) {
+    return
+  }
 
   if (webContents.isDevToolsOpened()) {
     webContents.closeDevTools()
@@ -338,16 +332,20 @@ async function handleOpenFileDialog() {
     updateWindowTitle()
     sendToRenderer('menu:open-file', { filePath: normalizedPath, content })
   } catch (error) {
-    handleFileOpenError(error)
+    if (error.code === 'FILE_TOO_LARGE') {
+      const sizeInMb = (error.size / (1024 * 1024)).toFixed(1)
+      dialog.showErrorBox('打开文件失败', `文件大小为 ${sizeInMb} MB，超过 ${MAX_RENDERER_FILE_SIZE / (1024 * 1024)} MB 限制。`)
+    } else {
+      dialog.showErrorBox('打开文件失败', translateFileSystemError(error))
+    }
   }
 }
 
-function resetEditorState() {
-  currentFilePath = null; hasUnsavedChanges = false; pendingQuitAfterSave = false; updateWindowTitle();
-}
-
 function handleNewFile() {
-  resetEditorState()
+  currentFilePath = null
+  hasUnsavedChanges = false
+  pendingQuitAfterSave = false
+  updateWindowTitle()
   sendToRenderer('menu:new-file')
 }
 
@@ -445,7 +443,11 @@ function registerIpcHandlers() {
       }
 
       const normalizedPath = await writeContentToFile(targetPath, content)
-      return buildSuccessResponse(normalizedPath)
+      currentFilePath = normalizedPath
+      hasUnsavedChanges = false
+      pendingQuitAfterSave = false
+      updateWindowTitle()
+      return { success: true, filePath: normalizedPath }
     } catch (error) {
       console.error('保存文件失败:', error)
       return buildErrorResponse(error)
@@ -460,7 +462,11 @@ function registerIpcHandlers() {
       }
 
       const normalizedPath = await writeContentToFile(targetPath, content)
-      return buildSuccessResponse(normalizedPath)
+      currentFilePath = normalizedPath
+      hasUnsavedChanges = false
+      pendingQuitAfterSave = false
+      updateWindowTitle()
+      return { success: true, filePath: normalizedPath }
     } catch (error) {
       console.error('另存为失败:', error)
       return buildErrorResponse(error)
@@ -481,39 +487,6 @@ function registerIpcHandlers() {
           }
         })
       }
-    }
-  })
-
-  // 自动保存到autosave文件夹
-  ipcMain.handle('file:auto-save', async (_event, content) => {
-    try {
-      // 创建autosave文件夹
-      const appPath = app.getAppPath()
-      const autosaveDir = path.join(path.dirname(appPath), 'autosave')
-
-      // 确保autosave文件夹存在
-      try {
-        await fsPromises.access(autosaveDir)
-      } catch {
-        await fsPromises.mkdir(autosaveDir, { recursive: true })
-      }
-
-      // 生成自动保存文件名（基于时间戳）
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const fileName = `autosave-${timestamp}.md`
-      const filePath = path.join(autosaveDir, fileName)
-
-      // 写入文件
-      await fsPromises.writeFile(filePath, content, 'utf8')
-
-      if (isDev) {
-        console.info('自动保存到:', filePath)
-      }
-
-      return { success: true, filePath }
-    } catch (error) {
-      console.error('自动保存失败:', error)
-      return buildErrorResponse(error)
     }
   })
 }
@@ -582,7 +555,12 @@ app.on('open-file', (_event, filePath) => {
       updateWindowTitle()
       sendToRenderer('menu:open-file', { filePath: normalizedPath, content })
     } catch (error) {
-      handleFileOpenError(error)
+      if (error.code === 'FILE_TOO_LARGE') {
+        const sizeInMb = (error.size / (1024 * 1024)).toFixed(1)
+        dialog.showErrorBox('打开文件失败', `文件大小为 ${sizeInMb} MB，超过 ${MAX_RENDERER_FILE_SIZE / (1024 * 1024)} MB 限制。`)
+      } else {
+        dialog.showErrorBox('打开文件失败', translateFileSystemError(error))
+      }
     }
   })()
 })

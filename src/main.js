@@ -6,7 +6,8 @@ import 'vditor/dist/js/lute/lute.min.js'
 const isDev = import.meta.env.DEV
 const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI)
 const DEFAULT_DOCUMENT_TITLE = typeof document !== 'undefined' ? document.title : 'WOK Editor'
-const MAX_INLINE_IMAGE_SIZE = 1024 * 1024; // 1MB
+const MAX_INLINE_IMAGE_SIZE_MB = 1
+const MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024
 const TOAST_DISPLAY_DURATION = 2000
 const TOAST_TRANSITION_DURATION = 300
 const OUTLINE_MIN_WIDTH = 200
@@ -16,15 +17,19 @@ const MAX_CONCURRENT_FILE_READS = 3
 const MAX_ALT_TEXT_LENGTH = 100
 const AUTO_SAVE_DELAY = 3000
 const AUTO_SAVE_MIN_INTERVAL = 10000
-const LOCAL_STORAGE_KEYS = {
-  CONTENT: 'wok-editor:last-content', UPDATED_AT: 'wok-editor:last-updated'
-};
+const LOCAL_STORAGE_CONTENT_KEY = 'wok-editor:last-content'
+const LOCAL_STORAGE_UPDATED_AT_KEY = 'wok-editor:last-updated'
 const BROWSER_AUTO_SAVE_DELAY = 1500
 const BROWSER_MAX_PERSISTED_CHAR_COUNT = 700000
 
-let vditor = null, activeToast = null, toastHideTimer = null, toastRemoveTimer = null;
-let teardownElectronHandlers = null, electronBeforeUnloadHandler = null;
-let resolveEditorReady = () => {}, editorReadyPromise = Promise.resolve();
+let vditor = null
+let activeToast = null
+let toastHideTimer = null
+let toastRemoveTimer = null
+let teardownElectronHandlers = null
+let electronBeforeUnloadHandler = null
+let resolveEditorReady = () => {}
+let editorReadyPromise = Promise.resolve()
 let isEditorDirty = false
 let suppressDirtyTracking = false
 let knownFilePath = null
@@ -165,8 +170,11 @@ function hello() {
 ;
 
 function getInitialEditorContent() {
-  const restored = !isElectron && readPersistedBrowserContent();
-  return typeof restored === 'string' && restored.length > 0 ? restored : defaultContent;
+  const restored = !isElectron ? readPersistedBrowserContent() : null
+  if (typeof restored === 'string' && restored.length > 0) {
+    return restored
+  }
+  return defaultContent
 }
 
 // 初始化编辑器
@@ -236,7 +244,7 @@ function initEditor() {
               messages.push(`已插入${successCount}张图片`)
             }
             if (oversized.length > 0) {
-              messages.push(`以下图片超过 1MB 未插入：${oversized.join('、')}`)
+              messages.push(`以下图片超过 ${MAX_INLINE_IMAGE_SIZE_MB}MB 未插入：${oversized.join('、')}`)
             }
             if (failed.length > 0) {
               messages.push(`以下图片读取失败：${failed.join('、')}`)
@@ -850,7 +858,7 @@ function showToast(message) {
 
 // Electron 文件操作功能
 function setupElectronHandlers() {
-  if (!isElectron) {
+  if (!isElectron || !window.electronAPI) {
     if (isDev) {
       console.info('Electron API bridge is not available on window, skipping IPC handlers')
     }
@@ -888,7 +896,7 @@ function setupElectronHandlers() {
         if (!data?.content) {
           return
         }
-        knownFilePath = data.filePath || null
+        knownFilePath = typeof data.filePath === 'string' && data.filePath.length > 0 ? data.filePath : null
         cancelAutoSave()
         withDirtyTrackingSuppressed(() => {
           editorInstance.setValue(data.content)
@@ -999,7 +1007,7 @@ function setupBrowserFallbacks() {
     return
   }
 
-  const lastPersistedAtRaw = window.localStorage.getItem(LOCAL_STORAGE_KEYS.UPDATED_AT)
+  const lastPersistedAtRaw = window.localStorage.getItem(LOCAL_STORAGE_UPDATED_AT_KEY)
   if (lastPersistedAtRaw) {
     const timestamp = Number(lastPersistedAtRaw)
     if (!Number.isNaN(timestamp) && timestamp > 0) {
@@ -1090,8 +1098,12 @@ function sanitizeAltText(rawName) {
     return 'image'
   }
 
-  const cleaned = rawName.replace(/[\u0000-\u001f\u007f\r\n]/g, ' ')
-    .replace(/[\[\]()]/g, '').replace(/\s+/g, ' ').trim();
+  const cleaned = rawName
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\r\n]/g, ' ')
+    .replace(/[\[\]()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 
   return cleaned.length > 0 ? cleaned.slice(0, MAX_ALT_TEXT_LENGTH) : 'image'
 }
@@ -1104,13 +1116,15 @@ function cancelAutoSave() {
 }
 
 function scheduleAutoSave() {
-  if (!isElectron || !window.electronAPI) {
+  if (!isElectron || !window.electronAPI || !knownFilePath) {
     return
   }
 
   const now = Date.now()
   const elapsed = now - lastAutoSaveTimestamp
-  const minimumDelay = Math.max(AUTO_SAVE_DELAY, AUTO_SAVE_MIN_INTERVAL - elapsed);
+  const minimumDelay = elapsed >= AUTO_SAVE_MIN_INTERVAL
+    ? AUTO_SAVE_DELAY
+    : Math.max(AUTO_SAVE_MIN_INTERVAL - elapsed, AUTO_SAVE_DELAY)
 
   cancelAutoSave()
 
@@ -1119,22 +1133,13 @@ function scheduleAutoSave() {
     executeWithEditor(
       async (editorInstance) => {
         const content = editorInstance.getValue()
-
-        // 如果有已知文件路径，保存到原文件；否则保存到autosave文件夹
-        let result
-        if (knownFilePath) {
-          result = await window.electronAPI.saveFile(content)
-        } else {
-          result = await window.electronAPI.autoSaveFile(content)
-        }
-
+        const result = await window.electronAPI.saveFile(content)
         if (result?.success) {
-          // 只有在保存到原文件时才更新knownFilePath
-          knownFilePath &&= result.filePath || knownFilePath;
+          knownFilePath = result.filePath || knownFilePath
           lastAutoSaveTimestamp = Date.now()
           markDirtyState(false)
           if (isDev) {
-            console.info('Auto-saved file:', result.filePath)
+            console.info('Auto-saved file:', knownFilePath)
           }
         } else if (result && !result.canceled && result.error) {
           showToast(`自动保存失败: ${result.error}`)
@@ -1208,13 +1213,13 @@ function readPersistedBrowserContent() {
   }
 
   try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_KEYS.CONTENT)
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_CONTENT_KEY)
     if (typeof raw !== 'string' || raw.length === 0) {
       return null
     }
     if (raw.length > BROWSER_MAX_PERSISTED_CHAR_COUNT) {
-      window.localStorage.removeItem(LOCAL_STORAGE_KEYS.CONTENT)
-      window.localStorage.removeItem(LOCAL_STORAGE_KEYS.UPDATED_AT)
+      window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
+      window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
       return null
     }
     return raw
@@ -1247,8 +1252,8 @@ function persistContentToLocalStorage(content) {
   browserPersistOverflowNotified = false
 
   try {
-    window.localStorage.setItem(LOCAL_STORAGE_KEYS.CONTENT, content)
-    window.localStorage.setItem(LOCAL_STORAGE_KEYS.UPDATED_AT, String(Date.now()))
+    window.localStorage.setItem(LOCAL_STORAGE_CONTENT_KEY, content)
+    window.localStorage.setItem(LOCAL_STORAGE_UPDATED_AT_KEY, String(Date.now()))
   } catch (error) {
     if (isDev) {
       console.warn('保存内容到本地缓存失败:', error)
@@ -1261,8 +1266,8 @@ function clearPersistedBrowserContent() {
     return
   }
   try {
-    window.localStorage.removeItem(LOCAL_STORAGE_KEYS.CONTENT)
-    window.localStorage.removeItem(LOCAL_STORAGE_KEYS.UPDATED_AT)
+    window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
+    window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
     browserPersistOverflowNotified = false
   } catch (error) {
     if (isDev) {
