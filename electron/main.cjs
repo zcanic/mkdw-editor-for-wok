@@ -489,39 +489,6 @@ function registerIpcHandlers() {
       }
     }
   })
-
-  // 自动保存到autosave文件夹
-  ipcMain.handle('file:auto-save', async (_event, content) => {
-    try {
-      // 创建autosave文件夹
-      const appPath = app.getAppPath()
-      const autosaveDir = path.join(path.dirname(appPath), 'autosave')
-
-      // 确保autosave文件夹存在
-      try {
-        await fsPromises.access(autosaveDir)
-      } catch {
-        await fsPromises.mkdir(autosaveDir, { recursive: true })
-      }
-
-      // 生成自动保存文件名（基于时间戳）
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const fileName = `autosave-${timestamp}.md`
-      const filePath = path.join(autosaveDir, fileName)
-
-      // 写入文件
-      await fsPromises.writeFile(filePath, content, 'utf8')
-
-      if (isDev) {
-        console.info('自动保存到:', filePath)
-      }
-
-      return { success: true, filePath }
-    } catch (error) {
-      console.error('自动保存失败:', error)
-      return buildErrorResponse(error)
-    }
-  })
 }
 
 app.whenReady().then(() => {

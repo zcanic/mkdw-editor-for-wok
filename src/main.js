@@ -3,104 +3,66 @@ import 'vditor/dist/index.css'
 import 'vditor/dist/js/i18n/zh_CN'
 import 'vditor/dist/js/lute/lute.min.js'
 
-const isDev = import.meta.env.DEV
-const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI)
-const DEFAULT_DOCUMENT_TITLE = typeof document !== 'undefined' ? document.title : 'WOK Editor'
-const MAX_INLINE_IMAGE_SIZE_MB = 1
-const MAX_INLINE_IMAGE_SIZE = MAX_INLINE_IMAGE_SIZE_MB * 1024 * 1024
-const TOAST_DISPLAY_DURATION = 2000
-const TOAST_TRANSITION_DURATION = 300
-const OUTLINE_MIN_WIDTH = 200
-const OUTLINE_MAX_WIDTH = 600
-const PREVIEW_RENDER_DELAY = 150
-const MAX_CONCURRENT_FILE_READS = 3
-const MAX_ALT_TEXT_LENGTH = 100
-const AUTO_SAVE_DELAY = 3000
-const AUTO_SAVE_MIN_INTERVAL = 10000
-const LOCAL_STORAGE_CONTENT_KEY = 'wok-editor:last-content'
-const LOCAL_STORAGE_UPDATED_AT_KEY = 'wok-editor:last-updated'
-const BROWSER_AUTO_SAVE_DELAY = 1500
-const BROWSER_MAX_PERSISTED_CHAR_COUNT = 700000
+// 导入模块
+import {
+  isDev,
+  isElectron,
+  DEFAULT_DOCUMENT_TITLE,
+  MAX_INLINE_IMAGE_SIZE_MB,
+  MAX_INLINE_IMAGE_SIZE,
+  TOAST_DISPLAY_DURATION,
+  TOAST_TRANSITION_DURATION,
+  OUTLINE_MIN_WIDTH,
+  OUTLINE_MAX_WIDTH,
+  PREVIEW_RENDER_DELAY,
+  MAX_CONCURRENT_FILE_READS,
+  MAX_ALT_TEXT_LENGTH,
+  AUTO_SAVE_DELAY,
+  AUTO_SAVE_MIN_INTERVAL,
+  LOCAL_STORAGE_CONTENT_KEY,
+  LOCAL_STORAGE_UPDATED_AT_KEY,
+  BROWSER_AUTO_SAVE_DELAY,
+  BROWSER_MAX_PERSISTED_CHAR_COUNT
+} from './core/constants.js'
+import {
+  getEditorDirty,
+  getSuppressDirtyTracking,
+  setSuppressDirtyTracking,
+  getKnownFilePath,
+  setKnownFilePath,
+  getAutoSaveTimer,
+  setAutoSaveTimer,
+  getLastAutoSaveTimestamp,
+  setLastAutoSaveTimestamp,
+  markDirtyState as setDirtyState
+} from './core/state.js'
+import { showToast } from './ui/toast.js'
+import {
+  installInlineEventAttributeGuard,
+  sanitizeInlineHandlers,
+  observeAndSanitizeInlineHandlers,
+  sanitizeAltText
+} from './ui/sanitizer.js'
+import { initOutlineResizer } from './ui/resizer.js'
+import {
+  cancelAutoSave,
+  scheduleAutoSave,
+  scheduleBrowserPersist,
+  cancelBrowserPersist,
+  isBrowserStorageAvailable,
+  readPersistedBrowserContent,
+  persistContentToLocalStorage,
+  clearPersistedBrowserContent
+} from './modules/file-system.js'
+import { setupElectronHandlers } from './modules/ipc-handlers.js'
 
 let vditor = null
-let activeToast = null
-let toastHideTimer = null
-let toastRemoveTimer = null
-let teardownElectronHandlers = null
-let electronBeforeUnloadHandler = null
 let resolveEditorReady = () => {}
 let editorReadyPromise = Promise.resolve()
-let isEditorDirty = false
-let suppressDirtyTracking = false
-let knownFilePath = null
-let autoSaveTimer = null
-let lastAutoSaveTimestamp = 0
-let browserPersistTimer = null
-let browserPersistOverflowNotified = false
-let isLocalStorageAvailable = null
 const vditorLocale = typeof window !== 'undefined' && window.VditorI18n ? window.VditorI18n : undefined
-let inlineEventGuardInstalled = false
 
 if (typeof window !== 'undefined' && vditorLocale) {
   window.VditorI18n = vditorLocale
-}
-
-function installInlineEventAttributeGuard() {
-  if (inlineEventGuardInstalled) {
-    return
-  }
-
-  if (typeof Element === 'undefined') {
-    return
-  }
-
-  // Acquire descriptor from Element.prototype first, fallback to HTMLElement.prototype for older engines.
-  const descriptorInfo = (() => {
-    const elementDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML')
-    if (elementDescriptor) {
-      return { descriptor: elementDescriptor, target: Element.prototype }
-    }
-    if (typeof HTMLElement !== 'undefined') {
-      const htmlDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerHTML')
-      if (htmlDescriptor) {
-        return { descriptor: htmlDescriptor, target: HTMLElement.prototype }
-      }
-    }
-    return null
-  })()
-
-  if (!descriptorInfo || typeof descriptorInfo.descriptor.set !== 'function') {
-    return
-  }
-
-  const { descriptor, target } = descriptorInfo
-  const originalSetter = descriptor.set
-  const originalGetter = descriptor.get
-
-  try {
-    Object.defineProperty(target, 'innerHTML', {
-      configurable: descriptor.configurable,
-      enumerable: descriptor.enumerable,
-      get: originalGetter,
-      set(value) {
-        let nextValue = value
-
-        if (typeof nextValue === 'string' && nextValue.includes('vditor') && /\son[a-z]+\s*=\s*/i.test(nextValue)) {
-          // Strip all inline event attributes to comply with strict CSP.
-          nextValue = nextValue
-            .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, ' ')
-            .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, ' ')
-            .replace(/\s{2,}/g, ' ')
-        }
-
-        return originalSetter.call(this, nextValue)
-      }
-    })
-
-    inlineEventGuardInstalled = true
-  } catch (_err) {
-    // Ignore descriptor redefinition failures (older browsers), fallback to runtime sanitization instead.
-  }
 }
 
 function resetEditorReadyPromise() {
@@ -187,6 +149,23 @@ function initEditor() {
   }
 
   installInlineEventAttributeGuard()
+  
+  // 拦截可能的动态脚本注入（来自 Vditor 内部）
+  if (typeof window !== 'undefined' && !window.__vditorScriptIntercepted) {
+    window.__vditorScriptIntercepted = true
+    
+    // 拦截 document.write（Vditor 某些版本可能使用）
+    const originalDocWrite = document.write
+    document.write = function(...args) {
+      // 忽略包含 script 标签的写入
+      const content = args.join('')
+      if (/<script/i.test(content)) {
+        console.warn('[CSP] Blocked document.write with script tag')
+        return
+      }
+      return originalDocWrite.apply(document, args)
+    }
+  }
 
   try {
     const initialValue = getInitialEditorContent()
@@ -197,9 +176,11 @@ function initEditor() {
       placeholder: '开始写作...',
       value: initialValue,
       lang: 'zh_CN',
-  i18n: vditorLocale,
+      i18n: vditorLocale,
+      // 禁用所有可能触发动态脚本的功能
+      _lutePath: '',  // 禁用 Lute 动态加载
       input: () => {
-        if (!suppressDirtyTracking) {
+        if (!getSuppressDirtyTracking()) {
           markDirtyState(true)
         }
       },
@@ -369,10 +350,13 @@ function initEditor() {
       },
       preview: {
         delay: PREVIEW_RENDER_DELAY,
+        mode: 'light',  // 使用轻量级渲染模式
         hljs: {
           enable: true,
           style: 'github',
           lineNumber: true,
+          // 禁用动态加载语言库（会触发 CSP 违规）
+          langs: [],
           // Override Vditor's default copy button renderer to avoid inline event handlers
           renderMenu: (codeEl, copyContainer) => {
             try {
@@ -442,9 +426,15 @@ function initEditor() {
           footnotes: true,
           autoSpace: true,
         },
+        // 完全禁用数学公式渲染以避免 CSP 违规（Vditor 会动态加载 MathJax）
         math: {
-          engine: 'KaTeX',
+          enable: false,
         },
+        // 禁用所有可能触发动态脚本的渲染器
+        speech: {
+          enable: false,
+        },
+        anchor: 0,
         // Sanitize the generated HTML before Vditor runs its renderers, to avoid
         // CSP-unsafe features (remote PlantUML, eval-based ECharts) and keep everything local.
         transform: (html) => {
@@ -499,7 +489,17 @@ function initEditor() {
       },
       after: () => {
         // 编辑器初始化完成后的回调
-        initOutlineResizer()
+        
+        // 禁用 Vditor 内部可能触发动态脚本的函数
+        if (vditor && vditor.lute && vditor.lute.SetJSRenderers) {
+          try {
+            // 覆盖可能使用 eval 或 Function 的渲染器
+            vditor.lute.SetJSRenderers = () => {}
+          } catch (_) {}
+        }
+        
+        const editorElement = document.getElementById('vditor')
+        initOutlineResizer(editorElement, vditor)
         fixPreviewTooltipBehavior()
         // Sanitize any inline event handlers Vditor may have injected (e.g., copy buttons)
         sanitizeInlineHandlers()
@@ -607,385 +607,7 @@ function fixPreviewTooltipBehavior() {
   disablePreviewTooltip()
 }
 
-// Remove CSP-unsafe inline event handlers from Vditor UI (e.g., copy buttons),
-// and reattach safe listeners.
-function sanitizeInlineHandlers(root = document) {
-  try {
-    const buttons = root.querySelectorAll('.vditor-copy > span')
-    buttons.forEach((btn) => {
-      if (btn.__wokSanitized) return
-      btn.removeAttribute('onclick')
-      btn.removeAttribute('onmouseover')
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        const textarea = btn.previousElementSibling
-        if (textarea && typeof textarea.select === 'function') {
-          textarea.select()
-          try {
-            document.execCommand('copy')
-          } catch (_err) { /* noop */ }
-          try {
-            const sel = window.getSelection && window.getSelection()
-            sel && sel.removeAllRanges && sel.removeAllRanges()
-          } catch (_err) { /* noop */ }
-          btn.setAttribute('aria-label', '已复制')
-          if (typeof textarea.blur === 'function') textarea.blur()
-        }
-      })
-      btn.addEventListener('mouseover', () => {
-        btn.setAttribute('aria-label', '复制')
-      })
-      btn.__wokSanitized = true
-    })
-
-    // Sanitize image preview overlay injected by Vditor (removes inline onclicks)
-    const overlays = root.querySelectorAll('.vditor-img')
-    overlays.forEach((overlay) => {
-      if (overlay.__wokSanitized) return
-      // Close areas with inline handlers
-      const closeBtn = overlay.querySelector('.vditor-img__bar > .vditor-img__btn:nth-child(2)')
-      const clickArea = overlay.querySelector('.vditor-img__img')
-      const doClose = () => {
-        try { document.body.style.overflow = '' } catch (_) {}
-        if (overlay && overlay.parentElement) {
-          overlay.parentElement.removeChild(overlay)
-        }
-      }
-      if (closeBtn) {
-        closeBtn.removeAttribute('onclick')
-        closeBtn.addEventListener('click', (e) => { e.stopPropagation(); doClose() })
-      }
-      if (clickArea) {
-        clickArea.removeAttribute('onclick')
-        clickArea.addEventListener('click', (e) => { e.stopPropagation(); doClose() })
-      }
-      overlay.__wokSanitized = true
-    })
-  } catch (_e) {
-    // no-op
-  }
-}
-
-function observeAndSanitizeInlineHandlers() {
-  const editor = document.getElementById('vditor')
-  const roots = [document.body]
-  if (editor) roots.push(editor)
-
-  const mo = new MutationObserver((mutations) => {
-    for (const m of mutations) {
-      if (m.type === 'childList') {
-        m.addedNodes.forEach((node) => {
-          if (node && node.querySelectorAll) {
-            sanitizeInlineHandlers(node)
-          }
-        })
-      }
-    }
-  })
-  roots.forEach((root) => {
-    mo.observe(root, { childList: true, subtree: true })
-    sanitizeInlineHandlers(root)
-  })
-}
-
-// 可拖动边界功能
-function initOutlineResizer() {
-  const editorElement = document.getElementById('vditor')
-  if (!editorElement) return
-
-  const ensureResizer = (outlineElement) => {
-    if (!outlineElement) return
-
-    let resizer = outlineElement.querySelector('.outline-resizer')
-    if (!resizer) {
-      resizer = document.createElement('div')
-      resizer.className = 'outline-resizer'
-      outlineElement.appendChild(resizer)
-    }
-
-    if (resizer.dataset.bound === 'true') return
-    resizer.dataset.bound = 'true'
-
-    let isResizing = false
-    let startX = 0
-    let startWidth = outlineElement.offsetWidth || OUTLINE_MIN_WIDTH
-
-    const stopResizing = () => {
-      if (!isResizing) return
-      isResizing = false
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', stopResizing)
-      window.removeEventListener('blur', stopResizing)
-    }
-
-    const handleMouseMove = (event) => {
-      if (!isResizing) return
-      const deltaX = event.clientX - startX
-      let newWidth = startWidth + deltaX
-
-      if (newWidth < OUTLINE_MIN_WIDTH) newWidth = OUTLINE_MIN_WIDTH
-      if (newWidth > OUTLINE_MAX_WIDTH) newWidth = OUTLINE_MAX_WIDTH
-
-      outlineElement.style.width = `${newWidth}px`
-      if (vditor) {
-        vditor.resize()
-      }
-    }
-
-    resizer.addEventListener('mousedown', (event) => {
-      if (event.button !== 0) return
-      isResizing = true
-      startX = event.clientX
-      const computedWidth = parseInt(window.getComputedStyle(outlineElement).width, 10)
-      startWidth = Number.isNaN(computedWidth)
-        ? outlineElement.offsetWidth || OUTLINE_MIN_WIDTH
-        : computedWidth
-
-      event.preventDefault()
-      document.addEventListener('mousemove', handleMouseMove)
-      document.addEventListener('mouseup', stopResizing)
-      window.addEventListener('blur', stopResizing)
-    })
-  }
-
-  const isDocumentFragment = (node) =>
-    typeof DocumentFragment !== 'undefined' && node instanceof DocumentFragment
-
-  const visitOutlineNodes = (root, callback) => {
-    if (!root || typeof callback !== 'function') return
-
-    const stack = []
-    const pushNode = (node) => {
-      if (!node) return
-      if (node instanceof HTMLElement) {
-        stack.push(node)
-      } else if (isDocumentFragment(node)) {
-        Array.from(node.childNodes || []).forEach((child) => pushNode(child))
-      }
-    }
-
-    pushNode(root)
-
-    while (stack.length > 0) {
-      const element = stack.pop()
-      if (!element) continue
-
-      if (element.classList && element.classList.contains('vditor-outline')) {
-        callback(element)
-      }
-
-      const children = element.children || []
-      for (const child of children) {
-        pushNode(child)
-      }
-    }
-  }
-
-  const observer = new MutationObserver((mutationsList) => {
-    for (const mutation of mutationsList) {
-      if (mutation.type !== 'childList') continue
-      for (const node of mutation.addedNodes) {
-        visitOutlineNodes(node, ensureResizer)
-      }
-      if (
-        mutation.target instanceof HTMLElement &&
-        mutation.target.classList.contains('vditor-outline')
-      ) {
-        ensureResizer(mutation.target)
-      }
-    }
-  })
-
-  observer.observe(editorElement, { childList: true, subtree: false })
-
-  visitOutlineNodes(editorElement, ensureResizer)
-}
-
-
-// 显示提示消息
-function showToast(message) {
-  if (!message) return
-
-  if (activeToast && activeToast.parentElement) {
-    activeToast.parentElement.removeChild(activeToast)
-  }
-
-  window.clearTimeout(toastHideTimer)
-  window.clearTimeout(toastRemoveTimer)
-  toastHideTimer = null
-  toastRemoveTimer = null
-
-  const toast = document.createElement('div')
-  toast.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: #333;
-    color: #fff;
-    padding: 12px 20px;
-    border-radius: 6px;
-    font-size: 14px;
-    z-index: 1000;
-    opacity: 0;
-    transform: translateY(-10px);
-    transition: opacity 0.3s ease, transform 0.3s ease;
-    white-space: pre-line;
-  `
-  toast.textContent = message
-  document.body.appendChild(toast)
-
-  // 使用 requestAnimationFrame 确保元素已插入后再执行动画
-  requestAnimationFrame(() => {
-    toast.style.opacity = '1'
-    toast.style.transform = 'translateY(0)'
-  })
-
-  toastHideTimer = window.setTimeout(() => {
-    toast.style.opacity = '0'
-    toast.style.transform = 'translateY(-10px)'
-    toastRemoveTimer = window.setTimeout(() => {
-      if (toast.parentElement) {
-        toast.parentElement.removeChild(toast)
-      }
-      if (activeToast === toast) {
-        activeToast = null
-      }
-    }, TOAST_TRANSITION_DURATION)
-  }, TOAST_DISPLAY_DURATION)
-
-  activeToast = toast
-}
-
-// Electron 文件操作功能
-function setupElectronHandlers() {
-  if (!isElectron || !window.electronAPI) {
-    if (isDev) {
-      console.info('Electron API bridge is not available on window, skipping IPC handlers')
-    }
-    return
-  }
-
-  if (typeof teardownElectronHandlers === 'function') {
-    teardownElectronHandlers()
-  }
-
-  const unsubscribes = []
-  const register = (unsubscribe) => {
-    if (typeof unsubscribe === 'function') {
-      unsubscribes.push(unsubscribe)
-    }
-  }
-
-  register(
-    window.electronAPI.onNewFile(() =>
-      executeWithEditor((editorInstance) => {
-        knownFilePath = null
-        cancelAutoSave()
-        withDirtyTrackingSuppressed(() => {
-          editorInstance.setValue('')
-        })
-        markDirtyState(false)
-        showToast('已创建新文件')
-      })
-    )
-  )
-
-  register(
-    window.electronAPI.onOpenFile((_event, data) =>
-      executeWithEditor((editorInstance) => {
-        if (!data?.content) {
-          return
-        }
-        knownFilePath = typeof data.filePath === 'string' && data.filePath.length > 0 ? data.filePath : null
-        cancelAutoSave()
-        withDirtyTrackingSuppressed(() => {
-          editorInstance.setValue(data.content)
-        })
-        markDirtyState(false)
-        if (data.filePath) {
-          showToast(`已打开文件: ${data.filePath}`)
-        } else {
-          showToast('文件内容已加载')
-        }
-      })
-    )
-  )
-
-  register(
-    window.electronAPI.onSaveFile(() =>
-      executeWithEditor(
-        async (editorInstance) => {
-          const content = editorInstance.getValue()
-          const result = await window.electronAPI.saveFile(content)
-          if (result?.success) {
-            knownFilePath = result.filePath || knownFilePath
-            lastAutoSaveTimestamp = Date.now()
-            markDirtyState(false)
-            showToast(`文件已保存: ${result.filePath}`)
-          } else if (result && !result.canceled && result.error) {
-            showToast(`保存失败: ${result.error}`)
-          }
-        },
-        (error) => {
-          if (isDev) {
-            console.error('保存文件时发生错误:', error)
-          }
-          showToast(`保存失败: ${error?.message || '未知错误'}`)
-        }
-      )
-    )
-  )
-
-  register(
-    window.electronAPI.onSaveAsFile(() =>
-      executeWithEditor(
-        async (editorInstance) => {
-          const content = editorInstance.getValue()
-          const result = await window.electronAPI.saveFileAs(content)
-          if (result?.success) {
-            knownFilePath = result.filePath || knownFilePath
-            lastAutoSaveTimestamp = Date.now()
-            markDirtyState(false)
-            showToast(`文件已另存为: ${result.filePath}`)
-          } else if (result && !result.canceled && result.error) {
-            showToast(`另存为失败: ${result.error}`)
-          }
-        },
-        (error) => {
-          if (isDev) {
-            console.error('另存为时发生错误:', error)
-          }
-          showToast(`另存为失败: ${error?.message || '未知错误'}`)
-        }
-      )
-    )
-  )
-
-  const cleanup = () => {
-    while (unsubscribes.length > 0) {
-      const unsubscribe = unsubscribes.pop()
-      try {
-        unsubscribe()
-      } catch (cleanupError) {
-        if (isDev) {
-          console.warn('清理 Electron 监听器失败:', cleanupError)
-        }
-      }
-    }
-
-    if (electronBeforeUnloadHandler) {
-      window.removeEventListener('beforeunload', electronBeforeUnloadHandler)
-      electronBeforeUnloadHandler = null
-    }
-  }
-
-  teardownElectronHandlers = cleanup
-  electronBeforeUnloadHandler = () => cleanup()
-  window.addEventListener('beforeunload', electronBeforeUnloadHandler)
-
-  return cleanup
-}
-
+// 浏览器环境回退功能
 function setupBrowserFallbacks() {
   if (isElectron) {
     return
@@ -996,7 +618,7 @@ function setupBrowserFallbacks() {
   }
 
   window.addEventListener('beforeunload', (event) => {
-    if (isEditorDirty) {
+    if (getEditorDirty()) {
       event.preventDefault()
       event.returnValue = ''
     }
@@ -1032,7 +654,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   initEditor()
   if (isElectron) {
-    setupElectronHandlers()
+    setupElectronHandlers(executeWithEditor, markDirtyState, withDirtyTrackingSuppressed)
   } else {
     setupBrowserFallbacks()
   }
@@ -1048,31 +670,16 @@ if (!isElectron && typeof document !== 'undefined') {
   })
 }
 
+// 标记脏状态并触发自动保存
 function markDirtyState(nextDirty) {
+  setDirtyState(nextDirty)
   const normalized = Boolean(nextDirty)
-  if (isEditorDirty !== normalized) {
-    isEditorDirty = normalized
-
-    if (!isElectron && typeof document !== 'undefined') {
-      document.title = normalized ? `* ${DEFAULT_DOCUMENT_TITLE}` : DEFAULT_DOCUMENT_TITLE
-    }
-
-    if (window.electronAPI && typeof window.electronAPI.setDirty === 'function') {
-      try {
-        window.electronAPI.setDirty(normalized)
-      } catch (error) {
-        if (isDev) {
-          console.warn('Failed to update dirty state via Electron bridge:', error)
-        }
-      }
-    }
-  }
 
   if (normalized) {
     if (isElectron) {
-      scheduleAutoSave()
+      scheduleAutoSave(executeWithEditor, markDirtyState)
     } else {
-      scheduleBrowserPersist()
+      scheduleBrowserPersist(executeWithEditor)
     }
   } else if (isElectron) {
     cancelAutoSave()
@@ -1085,205 +692,11 @@ function markDirtyState(nextDirty) {
 }
 
 function withDirtyTrackingSuppressed(fn) {
-  suppressDirtyTracking = true
+  setSuppressDirtyTracking(true)
   try {
     return fn()
   } finally {
-    suppressDirtyTracking = false
-  }
-}
-
-function sanitizeAltText(rawName) {
-  if (typeof rawName !== 'string' || rawName.length === 0) {
-    return 'image'
-  }
-
-  const cleaned = rawName
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/[\r\n]/g, ' ')
-    .replace(/[\[\]()]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return cleaned.length > 0 ? cleaned.slice(0, MAX_ALT_TEXT_LENGTH) : 'image'
-}
-
-function cancelAutoSave() {
-  if (autoSaveTimer) {
-    window.clearTimeout(autoSaveTimer)
-    autoSaveTimer = null
-  }
-}
-
-function scheduleAutoSave() {
-  if (!isElectron || !window.electronAPI) {
-    return
-  }
-
-  const now = Date.now()
-  const elapsed = now - lastAutoSaveTimestamp
-  const minimumDelay = elapsed >= AUTO_SAVE_MIN_INTERVAL
-    ? AUTO_SAVE_DELAY
-    : Math.max(AUTO_SAVE_MIN_INTERVAL - elapsed, AUTO_SAVE_DELAY)
-
-  cancelAutoSave()
-
-  autoSaveTimer = window.setTimeout(() => {
-    autoSaveTimer = null
-    executeWithEditor(
-      async (editorInstance) => {
-        const content = editorInstance.getValue()
-
-        // 如果有已知文件路径，保存到原文件；否则保存到autosave文件夹
-        let result
-        if (knownFilePath) {
-          result = await window.electronAPI.saveFile(content)
-        } else {
-          result = await window.electronAPI.autoSaveFile(content)
-        }
-
-        if (result?.success) {
-          // 只有在保存到原文件时才更新knownFilePath
-          if (knownFilePath) {
-            knownFilePath = result.filePath || knownFilePath
-          }
-          lastAutoSaveTimestamp = Date.now()
-          markDirtyState(false)
-          if (isDev) {
-            console.info('Auto-saved file:', result.filePath)
-          }
-        } else if (result && !result.canceled && result.error) {
-          showToast(`自动保存失败: ${result.error}`)
-        }
-      },
-      (error) => {
-        if (isDev) {
-          console.error('自动保存时发生错误:', error)
-        }
-        showToast(`自动保存失败: ${error?.message || '未知错误'}`)
-      }
-    )
-  }, minimumDelay)
-}
-
-function scheduleBrowserPersist() {
-  if (isElectron || !isBrowserStorageAvailable()) {
-    return
-  }
-
-  cancelBrowserPersist()
-  browserPersistTimer = window.setTimeout(() => {
-    browserPersistTimer = null
-    executeWithEditor((editorInstance) => {
-      const content = editorInstance.getValue()
-      persistContentToLocalStorage(content)
-    })
-  }, BROWSER_AUTO_SAVE_DELAY)
-}
-
-function cancelBrowserPersist() {
-  if (browserPersistTimer) {
-    window.clearTimeout(browserPersistTimer)
-    browserPersistTimer = null
-  }
-}
-
-function isBrowserStorageAvailable() {
-  if (isElectron || typeof window === 'undefined') {
-    return false
-  }
-
-  if (isLocalStorageAvailable !== null) {
-    return isLocalStorageAvailable
-  }
-
-  try {
-    const storage = window.localStorage
-    if (!storage) {
-      isLocalStorageAvailable = false
-      return false
-    }
-
-    const probeKey = '__wok_editor_probe__'
-    storage.setItem(probeKey, '1')
-    storage.removeItem(probeKey)
-    isLocalStorageAvailable = true
-  } catch (error) {
-    if (isDev) {
-      console.warn('localStorage is not available:', error)
-    }
-    isLocalStorageAvailable = false
-  }
-
-  return isLocalStorageAvailable
-}
-
-function readPersistedBrowserContent() {
-  if (!isBrowserStorageAvailable()) {
-    return null
-  }
-
-  try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_CONTENT_KEY)
-    if (typeof raw !== 'string' || raw.length === 0) {
-      return null
-    }
-    if (raw.length > BROWSER_MAX_PERSISTED_CHAR_COUNT) {
-      window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
-      window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
-      return null
-    }
-    return raw
-  } catch (error) {
-    if (isDev) {
-      console.warn('读取本地缓存内容失败:', error)
-    }
-    return null
-  }
-}
-
-function persistContentToLocalStorage(content) {
-  if (!isBrowserStorageAvailable() || typeof content !== 'string') {
-    return
-  }
-
-  if (content.length === 0) {
-    clearPersistedBrowserContent()
-    return
-  }
-
-  if (content.length > BROWSER_MAX_PERSISTED_CHAR_COUNT) {
-    if (!browserPersistOverflowNotified) {
-      showToast('内容超过浏览器本地缓存上限，已停止自动保存')
-      browserPersistOverflowNotified = true
-    }
-    return
-  }
-
-  browserPersistOverflowNotified = false
-
-  try {
-    window.localStorage.setItem(LOCAL_STORAGE_CONTENT_KEY, content)
-    window.localStorage.setItem(LOCAL_STORAGE_UPDATED_AT_KEY, String(Date.now()))
-  } catch (error) {
-    if (isDev) {
-      console.warn('保存内容到本地缓存失败:', error)
-    }
-  }
-}
-
-function clearPersistedBrowserContent() {
-  if (!isBrowserStorageAvailable()) {
-    return
-  }
-  try {
-    window.localStorage.removeItem(LOCAL_STORAGE_CONTENT_KEY)
-    window.localStorage.removeItem(LOCAL_STORAGE_UPDATED_AT_KEY)
-    browserPersistOverflowNotified = false
-  } catch (error) {
-    if (isDev) {
-      console.warn('清理本地缓存失败:', error)
-    }
+    setSuppressDirtyTracking(false)
   }
 }
 

@@ -2,8 +2,14 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws:; worker-src 'self' blob:; object-src 'self' data:;">
+    <!-- 
+      严格的 CSP 策略以防止 XSS 攻击
+      script-src: 添加 Vditor 所需的哈希值
+      font-src: 添加 https: 以允许外部字体（浏览器扩展可能需要）
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'sha256-qR4U4J3Ne5n0m3uNzGMB/tZ3TWJUf89OlxdXqjqALDM='; font-src 'self' data: https:; connect-src 'self' ws: wss:; worker-src 'self' blob:; object-src 'self' data:;">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <title>WOK Editor - 极简Markdown编辑器</title>
     <link rel="stylesheet" href="./src/style.css">
 </head>
