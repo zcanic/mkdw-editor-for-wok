@@ -21,9 +21,9 @@
 
     <div class="test-section">
         <h3>功能测试</h3>
-        <button onclick="testVersionHistoryFunctions()">测试版本历史函数</button>
-        <button onclick="testIPCFunctions()">测试 IPC 函数</button>
-        <button onclick="testUIComponents()">测试 UI 组件</button>
+        <button id="test-version-history-btn">测试版本历史函数</button>
+        <button id="test-ipc-btn">测试 IPC 函数</button>
+        <button id="test-ui-btn">测试 UI 组件</button>
         <div id="test-results"></div>
     </div>
 
@@ -107,6 +107,11 @@
         // 页面加载时自动运行测试
         window.addEventListener('load', () => {
             addTestResult('页面加载完成，开始测试...', 'info');
+            
+            // CSP 合规：使用 addEventListener 绑定事件
+            document.getElementById('test-version-history-btn').addEventListener('click', testVersionHistoryFunctions);
+            document.getElementById('test-ipc-btn').addEventListener('click', testIPCFunctions);
+            document.getElementById('test-ui-btn').addEventListener('click', testUIComponents);
         });
     </script>
 </body>

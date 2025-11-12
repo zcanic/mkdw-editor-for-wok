@@ -21,6 +21,14 @@ export function getEditorDirty() {
 }
 
 /**
+ * 设置编辑器脏状态（直接设置，不触发副作用）
+ * @param {boolean} value
+ */
+export function setEditorDirty(value) {
+  isEditorDirty = Boolean(value)
+}
+
+/**
  * 获取抑制脏状态跟踪标志
  * @returns {boolean}
  */
@@ -87,10 +95,15 @@ export function setLastAutoSaveTimestamp(timestamp) {
 /**
  * 标记编辑器脏状态
  * @param {boolean} nextDirty - 新的脏状态
+ * @param {Object} callbacks - 可选的回调函数
+ * @param {Function} callbacks.onDirty - 当状态变为 dirty 时调用
+ * @param {Function} callbacks.onClean - 当状态变为 clean 时调用
  */
-export function markDirtyState(nextDirty) {
+export function markDirtyState(nextDirty, callbacks = {}) {
   const normalized = Boolean(nextDirty)
-  if (isEditorDirty !== normalized) {
+  const changed = isEditorDirty !== normalized
+  
+  if (changed) {
     isEditorDirty = normalized
 
     // 在浏览器环境更新标题
@@ -107,6 +120,13 @@ export function markDirtyState(nextDirty) {
           console.warn('Failed to update dirty state via Electron bridge:', error)
         }
       }
+    }
+
+    // 触发回调
+    if (normalized && typeof callbacks.onDirty === 'function') {
+      callbacks.onDirty()
+    } else if (!normalized && typeof callbacks.onClean === 'function') {
+      callbacks.onClean()
     }
   }
 }

@@ -64,7 +64,7 @@ function assertSafeFilePath(filePath) {
 
   const normalizedPath = path.resolve(filePath)
 
-  // 禁止访问某些系统目录
+  // 禁止访问某些系统目录（使用路径前缀匹配，而非 includes）
   const forbiddenDirs = [
     '/System',
     '/private',
@@ -85,7 +85,15 @@ function assertSafeFilePath(filePath) {
   ]
 
   for (const forbiddenDir of forbiddenDirs) {
-    if (normalizedPath.toLowerCase().includes(forbiddenDir.toLowerCase())) {
+    // 规范化禁止目录路径
+    const normalizedForbidden = path.normalize(forbiddenDir)
+    const lowerPath = normalizedPath.toLowerCase()
+    const lowerForbidden = normalizedForbidden.toLowerCase()
+    
+    // 检查规范化后的路径是否以禁止目录开头（使用路径分隔符确保完整匹配）
+    if (lowerPath === lowerForbidden || 
+        lowerPath.startsWith(lowerForbidden + path.sep) ||
+        (path.sep === '\\' && lowerPath.startsWith(lowerForbidden + '/'))) {
       throw Object.assign(new Error(`禁止访问系统目录: ${forbiddenDir}`), { code: 'FORBIDDEN_PATH' })
     }
   }
@@ -359,8 +367,21 @@ function registerIpcHandlers() {
           const filePath = path.join(autosaveDir, file)
           try {
             const stats = await fsPromises.stat(filePath)
-            const content = await fsPromises.readFile(filePath, 'utf8')
             const sizeInKB = Math.round(stats.size / 1024)
+
+            // 仅读取前200字节用于预览（性能优化：避免加载大文件到内存）
+            const previewBuffer = Buffer.alloc(200)
+            const fd = await fsPromises.open(filePath, 'r')
+            let contentPreview = ''
+            try {
+              const { bytesRead } = await fd.read(previewBuffer, 0, 200, 0)
+              contentPreview = previewBuffer.toString('utf8', 0, bytesRead)
+              if (stats.size > bytesRead) {
+                contentPreview += '...'
+              }
+            } finally {
+              await fd.close()
+            }
 
             // 从文件名提取时间戳
             const timestampMatch = file.match(/autosave-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3})/)
@@ -371,8 +392,9 @@ function registerIpcHandlers() {
               filePath: filePath,
               timestamp: timestamp,
               size: sizeInKB,
-              contentPreview: content.substring(0, 200) + (content.length > 200 ? '...' : ''),
-              content: content
+              contentPreview: contentPreview
+              // 不再包含完整 content 字段（性能优化）
+              // 如需完整内容，使用 file:read-autosave 单独读取
             })
           } catch (error) {
             console.warn(`读取自动保存文件失败: ${file}`, error)
