@@ -41,11 +41,18 @@ export function cancelAutoSave() {
 
 /**
  * 调度自动保存任务
- * @param {Function} executeWithEditor - 执行编辑器操作的函数
- * @param {Function} markDirtyState - 标记脏状态的函数
+ * 注意：需要从 main.js 设置全局回调
  */
-export function scheduleAutoSave(executeWithEditor, markDirtyState) {
+export function scheduleAutoSave() {
   if (!isElectron || !window.electronAPI || !getKnownFilePath()) {
+    return
+  }
+
+  // 使用全局回调（由 main.js 设置）
+  if (typeof window.__wokAutoSaveCallback !== 'function') {
+    if (isDev) {
+      console.warn('Auto-save callback not set')
+    }
     return
   }
 
@@ -59,48 +66,32 @@ export function scheduleAutoSave(executeWithEditor, markDirtyState) {
 
   const timer = window.setTimeout(() => {
     setAutoSaveTimer(null)
-    executeWithEditor(
-      async (editorInstance) => {
-        const content = editorInstance.getValue()
-        const result = await window.electronAPI.saveFile(content)
-        if (result?.success) {
-          setKnownFilePath(result.filePath || getKnownFilePath())
-          setLastAutoSaveTimestamp(Date.now())
-          markDirtyState(false)
-          if (isDev) {
-            console.info('Auto-saved file:', getKnownFilePath())
-          }
-        } else if (result && !result.canceled && result.error) {
-          showToast(`自动保存失败: ${result.error}`)
-        }
-      },
-      (error) => {
-        if (isDev) {
-          console.error('自动保存时发生错误:', error)
-        }
-        showToast(`自动保存失败: ${error?.message || '未知错误'}`)
-      }
-    )
+    window.__wokAutoSaveCallback()
   }, minimumDelay)
   setAutoSaveTimer(timer)
 }
 
 /**
  * 调度浏览器持久化任务
- * @param {Function} executeWithEditor - 执行编辑器操作的函数
+ * 注意：需要从 main.js 设置全局回调
  */
-export function scheduleBrowserPersist(executeWithEditor) {
+export function scheduleBrowserPersist() {
   if (isElectron || !isBrowserStorageAvailable()) {
+    return
+  }
+
+  // 使用全局回调（由 main.js 设置）
+  if (typeof window.__wokBrowserPersistCallback !== 'function') {
+    if (isDev) {
+      console.warn('Browser persist callback not set')
+    }
     return
   }
 
   cancelBrowserPersist()
   browserPersistTimer = window.setTimeout(() => {
     browserPersistTimer = null
-    executeWithEditor((editorInstance) => {
-      const content = editorInstance.getValue()
-      persistContentToLocalStorage(content)
-    })
+    window.__wokBrowserPersistCallback()
   }, BROWSER_AUTO_SAVE_DELAY)
 }
 

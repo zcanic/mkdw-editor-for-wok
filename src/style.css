@@ -197,3 +197,279 @@ body {
     padding: 20px !important;
   }
 }
+/* 版本历史按钮样式 */
+.version-history-btn {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  z-index: 1000;
+  background: #5c6bc0;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(92, 107, 192, 0.3);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.version-history-btn:hover {
+  background: #4a5ab0;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(92, 107, 192, 0.4);
+}
+
+.version-history-btn:active {
+  transform: translateY(0);
+}
+
+/* 版本历史模态框样式 */
+.version-history-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.version-history-content {
+  background: white;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 800px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.version-history-header {
+  padding: 24px 24px 16px;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.version-history-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #2c3e50;
+  margin: 0;
+}
+
+.version-history-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #666;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.version-history-close:hover {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.version-history-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  min-height: 0;
+}
+
+.version-history-list {
+  width: 300px;
+  border-right: 1px solid #e0e0e0;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+.version-history-item {
+  padding: 16px;
+  border-bottom: 1px solid #e0e0e0;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  border-left: 3px solid transparent;
+}
+
+.version-history-item:hover {
+  background: #f0f4ff;
+}
+
+.version-history-item.active {
+  background: #e8eeff;
+  border-left-color: #5c6bc0;
+}
+
+.version-history-item-time {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+.version-history-item-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #2c3e50;
+  margin-bottom: 4px;
+}
+
+.version-history-item-size {
+  font-size: 12px;
+  color: #999;
+}
+
+.version-history-preview {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+  background: white;
+}
+
+.version-history-preview-header {
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.version-history-preview-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.version-history-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.version-history-btn-restore {
+  background: #5c6bc0;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.version-history-btn-restore:hover {
+  background: #4a5ab0;
+}
+
+.version-history-btn-delete {
+  background: #f44336;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.version-history-btn-delete:hover {
+  background: #d32f2f;
+}
+
+.version-history-content-preview {
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 16px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.version-history-empty {
+  text-align: center;
+  padding: 60px 24px;
+  color: #666;
+}
+
+.version-history-empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.version-history-empty-text {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.version-history-empty-subtext {
+  font-size: 14px;
+  color: #999;
+}
+
+.version-history-loading {
+  text-align: center;
+  padding: 60px 24px;
+  color: #666;
+}
+
+.version-history-loading-spinner {
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #5c6bc0;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 16px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .version-history-btn {
+    top: 12px;
+    left: 12px;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .version-history-content {
+    width: 95%;
+    max-height: 90vh;
+  }
+
+  .version-history-body {
+    flex-direction: column;
+  }
+
+  .version-history-list {
+    width: 100%;
+    max-height: 200px;
+  }
+
+  .version-history-preview {
+    padding: 16px;
+  }
+}

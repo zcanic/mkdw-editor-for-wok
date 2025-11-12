@@ -3,39 +3,32 @@ import 'vditor/dist/index.css'
 import 'vditor/dist/js/i18n/zh_CN'
 import 'vditor/dist/js/lute/lute.min.js'
 
-// 导入模块
+// 导入常量
 import {
   isDev,
   isElectron,
   DEFAULT_DOCUMENT_TITLE,
   MAX_INLINE_IMAGE_SIZE_MB,
   MAX_INLINE_IMAGE_SIZE,
-  TOAST_DISPLAY_DURATION,
-  TOAST_TRANSITION_DURATION,
-  OUTLINE_MIN_WIDTH,
-  OUTLINE_MAX_WIDTH,
-  PREVIEW_RENDER_DELAY,
   MAX_CONCURRENT_FILE_READS,
   MAX_ALT_TEXT_LENGTH,
-  AUTO_SAVE_DELAY,
-  AUTO_SAVE_MIN_INTERVAL,
-  LOCAL_STORAGE_CONTENT_KEY,
-  LOCAL_STORAGE_UPDATED_AT_KEY,
-  BROWSER_AUTO_SAVE_DELAY,
-  BROWSER_MAX_PERSISTED_CHAR_COUNT
+  vditorLocale
 } from './core/constants.js'
+
+// 导入状态管理
 import {
   getEditorDirty,
+  setEditorDirty,
   getSuppressDirtyTracking,
   setSuppressDirtyTracking,
   getKnownFilePath,
   setKnownFilePath,
-  getAutoSaveTimer,
-  setAutoSaveTimer,
   getLastAutoSaveTimestamp,
   setLastAutoSaveTimestamp,
-  markDirtyState as setDirtyState
+  markDirtyState
 } from './core/state.js'
+
+// 导入 UI 组件
 import { showToast } from './ui/toast.js'
 import {
   installInlineEventAttributeGuard,
@@ -44,9 +37,11 @@ import {
   sanitizeAltText
 } from './ui/sanitizer.js'
 import { initOutlineResizer } from './ui/resizer.js'
+
+// 导入功能模块
 import {
-  cancelAutoSave,
   scheduleAutoSave,
+  cancelAutoSave,
   scheduleBrowserPersist,
   cancelBrowserPersist,
   isBrowserStorageAvailable,
@@ -55,15 +50,11 @@ import {
   clearPersistedBrowserContent
 } from './modules/file-system.js'
 import { setupElectronHandlers } from './modules/ipc-handlers.js'
+import { initVersionHistory } from './modules/version-history.js'
 
 let vditor = null
 let resolveEditorReady = () => {}
 let editorReadyPromise = Promise.resolve()
-const vditorLocale = typeof window !== 'undefined' && window.VditorI18n ? window.VditorI18n : undefined
-
-if (typeof window !== 'undefined' && vditorLocale) {
-  window.VditorI18n = vditorLocale
-}
 
 function resetEditorReadyPromise() {
   editorReadyPromise = new Promise((resolve) => {
@@ -149,36 +140,16 @@ function initEditor() {
   }
 
   installInlineEventAttributeGuard()
-  
-  // 拦截可能的动态脚本注入（来自 Vditor 内部）
-  if (typeof window !== 'undefined' && !window.__vditorScriptIntercepted) {
-    window.__vditorScriptIntercepted = true
-    
-    // 拦截 document.write（Vditor 某些版本可能使用）
-    const originalDocWrite = document.write
-    document.write = function(...args) {
-      // 忽略包含 script 标签的写入
-      const content = args.join('')
-      if (/<script/i.test(content)) {
-        console.warn('[CSP] Blocked document.write with script tag')
-        return
-      }
-      return originalDocWrite.apply(document, args)
-    }
-  }
 
   try {
     const initialValue = getInitialEditorContent()
     vditor = new Vditor('vditor', {
-      cdn: './vditor',
       height: '100%',
       mode: 'ir',
       placeholder: '开始写作...',
       value: initialValue,
       lang: 'zh_CN',
       i18n: vditorLocale,
-      // 禁用所有可能触发动态脚本的功能
-      _lutePath: '',  // 禁用 Lute 动态加载
       input: () => {
         if (!getSuppressDirtyTracking()) {
           markDirtyState(true)
@@ -279,7 +250,8 @@ function initEditor() {
               inFlight += 1
               const reader = new FileReader()
 
-              reader.onload = () => {
+              // CSP 合规：使用 addEventListener 替代 onload/onerror 属性
+              reader.addEventListener('load', () => {
                 const result = reader.result
                 if (typeof result === 'string') {
                   const altText = sanitizeAltText(file.name)
@@ -289,12 +261,12 @@ function initEditor() {
                   failed.push(file.name)
                 }
                 handleAsyncCompletion()
-              }
+              })
 
-              reader.onerror = () => {
+              reader.addEventListener('error', () => {
                 failed.push(file.name)
                 handleAsyncCompletion()
-              }
+              })
 
               reader.readAsDataURL(file)
             }
@@ -350,13 +322,10 @@ function initEditor() {
       },
       preview: {
         delay: PREVIEW_RENDER_DELAY,
-        mode: 'light',  // 使用轻量级渲染模式
         hljs: {
           enable: true,
           style: 'github',
           lineNumber: true,
-          // 禁用动态加载语言库（会触发 CSP 违规）
-          langs: [],
           // Override Vditor's default copy button renderer to avoid inline event handlers
           renderMenu: (codeEl, copyContainer) => {
             try {
@@ -426,15 +395,9 @@ function initEditor() {
           footnotes: true,
           autoSpace: true,
         },
-        // 完全禁用数学公式渲染以避免 CSP 违规（Vditor 会动态加载 MathJax）
         math: {
-          enable: false,
+          engine: 'KaTeX',
         },
-        // 禁用所有可能触发动态脚本的渲染器
-        speech: {
-          enable: false,
-        },
-        anchor: 0,
         // Sanitize the generated HTML before Vditor runs its renderers, to avoid
         // CSP-unsafe features (remote PlantUML, eval-based ECharts) and keep everything local.
         transform: (html) => {
@@ -489,17 +452,7 @@ function initEditor() {
       },
       after: () => {
         // 编辑器初始化完成后的回调
-        
-        // 禁用 Vditor 内部可能触发动态脚本的函数
-        if (vditor && vditor.lute && vditor.lute.SetJSRenderers) {
-          try {
-            // 覆盖可能使用 eval 或 Function 的渲染器
-            vditor.lute.SetJSRenderers = () => {}
-          } catch (_) {}
-        }
-        
-        const editorElement = document.getElementById('vditor')
-        initOutlineResizer(editorElement, vditor)
+        initOutlineResizer()
         fixPreviewTooltipBehavior()
         // Sanitize any inline event handlers Vditor may have injected (e.g., copy buttons)
         sanitizeInlineHandlers()
@@ -607,7 +560,52 @@ function fixPreviewTooltipBehavior() {
   disablePreviewTooltip()
 }
 
-// 浏览器环境回退功能
+// 设置自动保存和持久化的全局回调
+function setupFileSystemCallbacks() {
+  // 自动保存回调（Electron）
+  window.__wokAutoSaveCallback = async () => {
+    try {
+      const editorInstance = await editorReadyPromise
+      if (!editorInstance) return
+      
+      const content = editorInstance.getValue()
+      const result = await window.electronAPI.saveFile(content)
+      
+      if (result?.success) {
+        setKnownFilePath(result.filePath || getKnownFilePath())
+        setLastAutoSaveTimestamp(Date.now())
+        markDirtyState(false)
+        if (isDev) {
+          console.info('Auto-saved file:', result.filePath)
+        }
+      } else if (result && !result.canceled && result.error) {
+        showToast(`自动保存失败: ${result.error}`)
+      }
+    } catch (error) {
+      if (isDev) {
+        console.error('自动保存时发生错误:', error)
+      }
+      showToast(`自动保存失败: ${error?.message || '未知错误'}`)
+    }
+  }
+
+  // 浏览器持久化回调
+  window.__wokBrowserPersistCallback = async () => {
+    try {
+      const editorInstance = await editorReadyPromise
+      if (!editorInstance) return
+      
+      const content = editorInstance.getValue()
+      persistContentToLocalStorage(content)
+    } catch (error) {
+      if (isDev) {
+        console.warn('Browser persist failed:', error)
+      }
+    }
+  }
+}
+
+// 浏览器回退模式设置
 function setupBrowserFallbacks() {
   if (isElectron) {
     return
@@ -617,6 +615,7 @@ function setupBrowserFallbacks() {
     console.info('Running in browser mode, enabling local storage persistence')
   }
 
+  // 页面卸载前警告未保存的更改
   window.addEventListener('beforeunload', (event) => {
     if (getEditorDirty()) {
       event.preventDefault()
@@ -629,7 +628,8 @@ function setupBrowserFallbacks() {
     return
   }
 
-  const lastPersistedAtRaw = window.localStorage.getItem(LOCAL_STORAGE_UPDATED_AT_KEY)
+  // 显示上次保存时间
+  const lastPersistedAtRaw = window.localStorage.getItem('wok-editor:last-updated')
   if (lastPersistedAtRaw) {
     const timestamp = Number(lastPersistedAtRaw)
     if (!Number.isNaN(timestamp) && timestamp > 0) {
@@ -642,6 +642,7 @@ function setupBrowserFallbacks() {
     showToast('浏览器模式已启用，内容会自动保存到本地存储')
   }
 
+  // 初始保存一次
   executeWithEditor((editorInstance) => {
     persistContentToLocalStorage(editorInstance.getValue())
   })
@@ -652,12 +653,46 @@ document.addEventListener('DOMContentLoaded', () => {
   if (isDev) {
     console.info('Renderer DOMContentLoaded: initializing editor')
   }
+  
+  // 设置文件系统回调
+  setupFileSystemCallbacks()
+  
+  // 初始化编辑器
   initEditor()
+  
+  // 设置 markDirtyState 的回调以触发自动保存
+  const originalMarkDirtyState = markDirtyState
+  window.markDirtyState = (dirty) => {
+    originalMarkDirtyState(dirty, {
+      onDirty: () => {
+        if (isElectron) {
+          scheduleAutoSave()
+        } else {
+          scheduleBrowserPersist()
+        }
+      },
+      onClean: () => {
+        if (isElectron) {
+          cancelAutoSave()
+        } else {
+          cancelBrowserPersist()
+          executeWithEditor((editorInstance) => {
+            persistContentToLocalStorage(editorInstance.getValue())
+          })
+        }
+      }
+    })
+  }
+  
+  // 设置 Electron 或浏览器模式
   if (isElectron) {
-    setupElectronHandlers(executeWithEditor, markDirtyState, withDirtyTrackingSuppressed)
+    setupElectronHandlers(executeWithEditor, window.markDirtyState, withDirtyTrackingSuppressed)
   } else {
     setupBrowserFallbacks()
   }
+  
+  // 初始化版本历史模块
+  initVersionHistory(editorReadyPromise)
 })
 
 if (!isElectron && typeof document !== 'undefined') {
@@ -670,33 +705,13 @@ if (!isElectron && typeof document !== 'undefined') {
   })
 }
 
-// 标记脏状态并触发自动保存
-function markDirtyState(nextDirty) {
-  setDirtyState(nextDirty)
-  const normalized = Boolean(nextDirty)
-
-  if (normalized) {
-    if (isElectron) {
-      scheduleAutoSave(executeWithEditor, markDirtyState)
-    } else {
-      scheduleBrowserPersist(executeWithEditor)
-    }
-  } else if (isElectron) {
-    cancelAutoSave()
-  } else {
-    cancelBrowserPersist()
-    executeWithEditor((editorInstance) => {
-      persistContentToLocalStorage(editorInstance.getValue())
-    })
-  }
-}
-
 function withDirtyTrackingSuppressed(fn) {
+  const wasSuppressed = getSuppressDirtyTracking()
   setSuppressDirtyTracking(true)
   try {
     return fn()
   } finally {
-    setSuppressDirtyTracking(false)
+    setSuppressDirtyTracking(wasSuppressed)
   }
 }
 
