@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>版本历史功能测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; }
+        .info { background-color: #d1ecf1; border-color: #bee5eb; }
+        button { margin: 5px; padding: 8px 12px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>版本历史功能测试页面</h1>
+
+    <div class="test-section info">
+        <h3>测试说明</h3>
+        <p>这个页面用于测试版本历史功能的各个组件是否正常工作。</p>
+    </div>
+
+    <div class="test-section">
+        <h3>功能测试</h3>
+        <button onclick="testVersionHistoryFunctions()">测试版本历史函数</button>
+        <button onclick="testIPCFunctions()">测试 IPC 函数</button>
+        <button onclick="testUIComponents()">测试 UI 组件</button>
+        <div id="test-results"></div>
+    </div>
+
+    <script>
+        function addTestResult(message, type = 'info') {
+            const resultsDiv = document.getElementById('test-results');
+            const resultDiv = document.createElement('div');
+            resultDiv.className = `test-section ${type}`;
+            resultDiv.innerHTML = message;
+            resultsDiv.appendChild(resultDiv);
+        }
+
+        function testVersionHistoryFunctions() {
+            addTestResult('<h4>测试版本历史函数</h4>', 'info');
+
+            // 测试函数是否存在
+            const functions = [
+                'showVersionHistory',
+                'closeVersionHistory',
+                'selectVersion',
+                'restoreVersion',
+                'deleteVersion',
+                'formatFileTime',
+                'escapeHtml'
+            ];
+
+            functions.forEach(funcName => {
+                if (typeof window[funcName] === 'function') {
+                    addTestResult(`✅ ${funcName} 函数已定义`, 'success');
+                } else {
+                    addTestResult(`❌ ${funcName} 函数未定义`, 'error');
+                }
+            });
+        }
+
+        function testIPCFunctions() {
+            addTestResult('<h4>测试 IPC 函数</h4>', 'info');
+
+            if (window.electronAPI) {
+                addTestResult('✅ electronAPI 对象存在', 'success');
+
+                const ipcFunctions = [
+                    'listAutoSaveFiles',
+                    'readAutoSaveFile',
+                    'onVersionHistory'
+                ];
+
+                ipcFunctions.forEach(funcName => {
+                    if (typeof window.electronAPI[funcName] === 'function') {
+                        addTestResult(`✅ electronAPI.${funcName} 函数已定义`, 'success');
+                    } else {
+                        addTestResult(`❌ electronAPI.${funcName} 函数未定义`, 'error');
+                    }
+                });
+            } else {
+                addTestResult('❌ electronAPI 对象不存在', 'error');
+            }
+        }
+
+        function testUIComponents() {
+            addTestResult('<h4>测试 UI 组件</h4>', 'info');
+
+            // 测试 CSS 样式是否存在
+            const styles = [
+                'version-history-btn',
+                'version-history-modal',
+                'version-history-content',
+                'version-history-item'
+            ];
+
+            styles.forEach(styleName => {
+                const elements = document.querySelectorAll(`.${styleName}`);
+                if (elements.length > 0 || document.styleSheets[0].cssRules) {
+                    addTestResult(`✅ ${styleName} 样式定义存在`, 'success');
+                } else {
+                    addTestResult(`⚠️ ${styleName} 样式定义可能不存在`, 'info');
+                }
+            });
+        }
+
+        // 页面加载时自动运行测试
+        window.addEventListener('load', () => {
+            addTestResult('页面加载完成，开始测试...', 'info');
+        });
+    </script>
+</body>
+</html>

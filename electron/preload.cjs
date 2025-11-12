@@ -14,8 +14,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onOpenFile: (listener) => exposeListener('menu:open-file', listener),
   onSaveFile: (listener) => exposeListener('menu:save-file', listener),
   onSaveAsFile: (listener) => exposeListener('menu:save-as-file', listener),
+  onVersionHistory: (listener) => exposeListener('menu:version-history', listener),
   saveFile: (content) => ipcRenderer.invoke('file:save', content),
   saveFileAs: (content) => ipcRenderer.invoke('file:save-as', content),
   autoSaveFile: (content) => ipcRenderer.invoke('file:auto-save', content),
-  setDirty: (isDirty) => ipcRenderer.send('file:set-dirty', isDirty)
+  listAutoSaveFiles: () => ipcRenderer.invoke('file:list-autosave'),
+  readAutoSaveFile: (filePath) => ipcRenderer.invoke('file:read-autosave', filePath),
+  setDirty: (isDirty) => ipcRenderer.send('file:set-dirty', Boolean(isDirty))
 })
